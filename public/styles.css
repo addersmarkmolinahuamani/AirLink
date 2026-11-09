@@ -65,7 +65,7 @@ body {
   position: relative;
   z-index: 1;
   width: 100%;
-  max-width: 1240px;
+  max-width: 900px;
   margin: 0 auto;
   padding: 24px 20px;
   display: flex;
@@ -588,6 +588,33 @@ body:not(.is-mobile-device) .mobile-only-btn {
   font-family: 'Outfit', sans-serif;
   font-size: 1.1rem;
   font-weight: 600;
+}
+
+.files-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-open-drive {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(56, 189, 248, 0.1);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: var(--transition);
+}
+
+.btn-open-drive:hover {
+  background: rgba(56, 189, 248, 0.2);
+  border-color: rgba(56, 189, 248, 0.5);
+  color: #fff;
 }
 
 .btn-refresh {

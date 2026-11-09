@@ -1,423 +1,344 @@
-// Estado de la Aplicación
-let currentMode = 'internet'; // 'internet' o 'local'
-let serverData = {
-  localUrl: '',
-  publicUrl: '',
-  localPairUrl: '',
-  publicPairUrl: '',
-  localQrCode: '',
-  publicQrCode: '',
-  pairId: ''
-};
+// AirLink Express - Nube Directa en Google Drive (Serverless)
+// Compatible con GitHub Pages, Celular y Laptop sin consumir recursos locales
+
+const DEFAULT_CLIENT_ID = '53478639551-f0vfjugegac0kvafr0n74rktgi1p6n5l.apps.googleusercontent.com';
+const SCOPES = 'https://www.googleapis.com/auth/drive';
+
+let tokenClient = null;
+let accessToken = localStorage.getItem('airlink_drive_token') || null;
+let tokenExpiry = parseInt(localStorage.getItem('airlink_token_expiry') || '0', 10);
+let airlinkFolderId = localStorage.getItem('airlink_folder_id') || null;
+let activeMainTab = 'files';
+
+let filesData = [];
+let messagesData = [];
+let messagesFileId = localStorage.getItem('airlink_messages_file_id') || null;
+let pollTimer = null;
 
 // Detección de dispositivo (Móvil vs Laptop)
 const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth <= 860;
 
-// Detección de Vinculación Permanente Inicial (Estilo WhatsApp Web)
-const urlParams = new URLSearchParams(window.location.search);
-const incomingPairId = urlParams.get('pair');
-if (incomingPairId) {
-  localStorage.setItem('airlink_pair_id', incomingPairId);
-  urlParams.delete('pair');
-  const cleanUrl = window.location.pathname + (urlParams.toString() ? '?' + urlParams.toString() : '');
-  window.history.replaceState({}, document.title, cleanUrl);
-}
-
 // Elementos DOM
 const deviceBadge = document.getElementById('deviceBadge');
 const deviceText = document.getElementById('deviceText');
-const uploadTitle = document.getElementById('uploadTitle');
-const uploadTargetBadge = document.getElementById('uploadTargetBadge');
-const qrImage = document.getElementById('qrImage');
-const qrLoading = document.getElementById('qrLoading');
-const activeUrlInput = document.getElementById('activeUrlInput');
-const btnCopyUrl = document.getElementById('btnCopyUrl');
+const btnDriveAuth = document.getElementById('btnDriveAuth');
+const driveAuthText = document.getElementById('driveAuthText');
+const driveBanner = document.getElementById('driveBanner');
+const driveBannerTitle = document.getElementById('driveBannerTitle');
+const driveBannerDesc = document.getElementById('driveBannerDesc');
+const btnDriveAction = document.getElementById('btnDriveAction');
+
+const tabNavFiles = document.getElementById('tabNavFiles');
+const tabNavChat = document.getElementById('tabNavChat');
+const tabFilesBadge = document.getElementById('tabFilesBadge');
+const tabChatBadge = document.getElementById('tabChatBadge');
+const chatUnreadDot = document.getElementById('chatUnreadDot');
+
+const filesTabSection = document.getElementById('filesTabSection');
+const chatTabSection = document.getElementById('chatTabSection');
+
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const cameraInput = document.getElementById('cameraInput');
 const btnSelectFiles = document.getElementById('btnSelectFiles');
 const btnPasteCapture = document.getElementById('btnPasteCapture');
 const btnCamera = document.getElementById('btnCamera');
-const btnOpenFolder = document.getElementById('btnOpenFolder');
+const btnOpenDriveFolder = document.getElementById('btnOpenDriveFolder');
+const btnRefresh = document.getElementById('btnRefresh');
+
 const progressContainer = document.getElementById('progressContainer');
 const progressBarFill = document.getElementById('progressBarFill');
 const progressPercent = document.getElementById('progressPercent');
 const progressInfo = document.getElementById('progressInfo');
+
 const filesList = document.getElementById('filesList');
 const filesCount = document.getElementById('filesCount');
-const btnRefresh = document.getElementById('btnRefresh');
 const emptyState = document.getElementById('emptyState');
+
+const chatInput = document.getElementById('chatInput');
+const btnSendText = document.getElementById('btnSendText');
+const btnPasteText = document.getElementById('btnPasteText');
+const btnClearChat = document.getElementById('btnClearChat');
+const chatCharCounter = document.getElementById('chatCharCounter');
+const chatMessagesList = document.getElementById('chatMessagesList');
+const emptyChatState = document.getElementById('emptyChatState');
+const messagesCount = document.getElementById('messagesCount');
+
 const toast = document.getElementById('toast');
 const toastMessage = document.getElementById('toastMessage');
 
-// Elementos de Pestañas
-const tabNavFiles = document.getElementById('tabNavFiles');
-const tabNavChat = document.getElementById('tabNavChat');
-const tabFilesBadge = document.getElementById('tabFilesBadge');
-const tabChatBadge = document.getElementById('tabChatBadge');
-const chatUnreadDot = document.getElementById('chatUnreadDot');
-const filesTabSection = document.getElementById('filesTabSection');
-const chatTabSection = document.getElementById('chatTabSection');
-const chatTargetDeviceText = document.getElementById('chatTargetDeviceText');
-
-// Elementos de Chat y Portapapeles
-const chatInput = document.getElementById('chatInput');
-const btnPasteText = document.getElementById('btnPasteText');
-const chatCharCounter = document.getElementById('chatCharCounter');
-const btnSendText = document.getElementById('btnSendText');
-const btnClearChat = document.getElementById('btnClearChat');
-const messagesCount = document.getElementById('messagesCount');
-const chatMessagesList = document.getElementById('chatMessagesList');
-const emptyChatState = document.getElementById('emptyChatState');
-
-let activeMainTab = 'files';
-let messagesData = [];
-let filesData = [];
-let pendingShareFileObj = null;
-
-// Inferir MIME type por extensión para que WhatsApp y el sistema reconozcan el archivo
-function getMimeTypeFromName(filename, fallbackType) {
-  if (fallbackType && fallbackType !== 'application/octet-stream') return fallbackType;
-  const ext = (filename.split('.').pop() || '').toLowerCase();
-  const map = {
-    pdf: 'application/pdf',
-    jpg: 'image/jpeg',
-    jpeg: 'image/jpeg',
-    png: 'image/png',
-    gif: 'image/gif',
-    webp: 'image/webp',
-    svg: 'image/svg+xml',
-    mp4: 'video/mp4',
-    webm: 'video/webm',
-    mov: 'video/quicktime',
-    mp3: 'audio/mpeg',
-    wav: 'audio/wav',
-    ogg: 'audio/ogg',
-    m4a: 'audio/mp4',
-    doc: 'application/msword',
-    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    xls: 'application/vnd.ms-excel',
-    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    ppt: 'application/vnd.ms-powerpoint',
-    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-    zip: 'application/zip',
-    rar: 'application/vnd.rar',
-    txt: 'text/plain',
-    csv: 'text/csv'
-  };
-  return map[ext] || 'application/octet-stream';
-}
-
-// Configuración visual según el dispositivo
-const dropSubtext = document.getElementById('dropSubtext');
+// Configuración inicial de dispositivo
 if (isMobile) {
   document.body.classList.add('is-mobile-device');
-  deviceText.textContent = 'Celular';
-  deviceBadge.querySelector('.device-icon').textContent = '📱';
-  uploadTitle.textContent = 'Enviar a la Laptop';
-  uploadTargetBadge.textContent = 'Destino: Tu Laptop 💻';
-  if (chatTargetDeviceText) chatTargetDeviceText.textContent = 'Laptop';
-  if (btnPasteCapture) btnPasteCapture.style.display = 'none'; // Ocultar Pegar Captura en celular
-  if (dropSubtext) dropSubtext.textContent = 'Fotos, videos, documentos sin compresión ni límite';
+  if (deviceBadge) {
+    deviceBadge.querySelector('.device-icon').textContent = '📱';
+    if (deviceText) deviceText.textContent = 'Celular';
+  }
 } else {
-  deviceText.textContent = 'Laptop';
-  deviceBadge.querySelector('.device-icon').textContent = '💻';
-  uploadTitle.textContent = 'Enviar al Celular';
-  uploadTargetBadge.textContent = 'Destino: Tu Celular 📱';
-  if (chatTargetDeviceText) chatTargetDeviceText.textContent = 'Celular';
-  if (btnCamera) btnCamera.style.display = 'none'; // Ocultar botón de cámara en laptop
-  if (btnPasteCapture) btnPasteCapture.style.display = 'inline-flex';
-  if (dropSubtext) dropSubtext.innerHTML = 'Fotos, videos, documentos o presiona <strong style="color:var(--text-main);">Ctrl+V</strong> para pegar capturas';
+  if (deviceBadge) {
+    deviceBadge.querySelector('.device-icon').textContent = '💻';
+    if (deviceText) deviceText.textContent = 'Laptop';
+  }
 }
 
-// Reproducir sonido sutil de notificación con Web Audio API
+// -------------------------------------------------------------
+// Notificaciones Toast y Sonido
+// -------------------------------------------------------------
+function showToast(msg) {
+  if (!toast || !toastMessage) return;
+  toastMessage.textContent = msg;
+  toast.classList.add('show');
+  setTimeout(() => {
+    toast.classList.remove('show');
+  }, 3500);
+}
+
 function playChime() {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15); // A5
-    gain.gain.setValueAtTime(0.12, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
     osc.connect(gain);
     gain.connect(ctx.destination);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15);
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
     osc.start();
-    osc.stop(ctx.currentTime + 0.35);
-  } catch (e) {
-    // Silencio si no está permitido
-  }
-}
-
-// Mostrar Toast
-function showToast(msg) {
-  toastMessage.textContent = msg;
-  toast.classList.add('show');
-  setTimeout(() => {
-    toast.classList.remove('show');
-  }, 3000);
-}
-
-// Cambiar modo de red (Internet vs Wi-Fi Local)
-function switchNetworkMode(mode) {
-  currentMode = mode;
-  document.getElementById('tabInternet').classList.toggle('active', mode === 'internet');
-  document.getElementById('tabLocal').classList.toggle('active', mode === 'local');
-  updateQrDisplay();
-}
-
-// Actualizar la visualización del código QR y enlace de vinculación permanente
-function updateQrDisplay() {
-  const pairStatusBadgeText = document.getElementById('pairStatusBadgeText');
-  const permanentPairCard = document.getElementById('permanentPairCard');
-
-  if (currentMode === 'internet') {
-    const publicUrlToUse = serverData.publicPairUrl || serverData.publicUrl;
-    if (publicUrlToUse && serverData.publicQrCode) {
-      qrImage.src = serverData.publicQrCode;
-      qrImage.style.display = 'block';
-      qrLoading.style.display = 'none';
-      activeUrlInput.value = publicUrlToUse;
-      if (pairStatusBadgeText) pairStatusBadgeText.textContent = 'Código QR listo para escanear';
-    } else {
-      qrImage.style.display = 'none';
-      qrLoading.style.display = 'flex';
-      qrLoading.querySelector('span').textContent = 'Generando enlace seguro con Cloudflare...';
-      activeUrlInput.value = 'Esperando túnel seguro...';
-      if (pairStatusBadgeText) pairStatusBadgeText.textContent = 'Generando enlace seguro...';
-    }
-  } else {
-    // Modo Local
-    const localUrlToUse = serverData.localPairUrl || serverData.localUrl;
-    if (localUrlToUse && serverData.localQrCode) {
-      qrImage.src = serverData.localQrCode;
-      qrImage.style.display = 'block';
-      qrLoading.style.display = 'none';
-      activeUrlInput.value = localUrlToUse;
-      if (pairStatusBadgeText) pairStatusBadgeText.textContent = 'Código QR local (Wi-Fi) listo';
-    }
-  }
-}
-
-// Copiar URL al portapapeles
-btnCopyUrl.addEventListener('click', async () => {
-  const url = activeUrlInput.value;
-  if (!url || url.startsWith('Cargando') || url.startsWith('Esperando')) return;
-  try {
-    await navigator.clipboard.writeText(url);
-    showToast('¡Enlace copiado al portapapeles!');
-  } catch (err) {
-    activeUrlInput.select();
-    document.execCommand('copy');
-    showToast('¡Enlace copiado!');
-  }
-});
-
-// Abrir carpeta en Windows (Solo Laptop)
-if (btnOpenFolder) {
-  btnOpenFolder.addEventListener('click', async () => {
-    try {
-      const res = await fetch('/api/open-folder', { method: 'POST' });
-      const data = await res.json();
-      if (data.success) {
-        showToast('Carpeta abierta en tu explorador de archivos');
-      }
-    } catch (e) {
-      showToast('No se pudo abrir la carpeta automáticamente');
-    }
-  });
-}
-
-// Actualizar estado visual de Google Drive
-function updateDriveUI(connected) {
-  const btnDriveBadge = document.getElementById('btnDriveBadge');
-  const driveStatusText = document.getElementById('driveStatusText');
-  const driveBanner = document.getElementById('driveBanner');
-  const driveBannerTitle = document.getElementById('driveBannerTitle');
-  const driveBannerDesc = document.getElementById('driveBannerDesc');
-  const btnDriveAction = document.getElementById('btnDriveAction');
-
-  if (connected) {
-    if (btnDriveBadge) {
-      btnDriveBadge.classList.add('connected');
-      btnDriveBadge.title = 'Google Drive conectado: respaldo activo';
-    }
-    if (driveStatusText) driveStatusText.textContent = 'Drive Activo';
-    if (driveBanner) {
-      driveBanner.classList.add('connected');
-    }
-    if (driveBannerTitle) driveBannerTitle.textContent = '☁️ Google Drive Activo';
-    if (driveBannerDesc) driveBannerDesc.textContent = 'Tus archivos se respaldan automáticamente en la carpeta "AirLink Express" de Google Drive.';
-    if (btnDriveAction) {
-      btnDriveAction.classList.add('connected');
-      btnDriveAction.textContent = '✓ Conectado';
-      btnDriveAction.removeAttribute('href');
-      btnDriveAction.style.pointerEvents = 'none';
-    }
-  } else {
-    if (btnDriveBadge) {
-      btnDriveBadge.classList.remove('connected');
-      btnDriveBadge.title = 'Conectar con Google Drive';
-    }
-    if (driveStatusText) driveStatusText.textContent = 'Conectar Drive';
-    if (driveBanner) {
-      driveBanner.classList.remove('connected');
-    }
-    if (driveBannerTitle) driveBannerTitle.textContent = 'Respaldo en Google Drive';
-    if (driveBannerDesc) driveBannerDesc.textContent = 'Conecta tu cuenta para transferir sin límites ni caídas entre WhatsApp y Laptop.';
-    if (btnDriveAction) {
-      btnDriveAction.classList.remove('connected');
-      btnDriveAction.textContent = 'Conectar Drive';
-      btnDriveAction.setAttribute('href', '/auth/google');
-      btnDriveAction.style.pointerEvents = 'auto';
-    }
-  }
-}
-
-async function checkDriveStatus() {
-  try {
-    const res = await fetch('/api/info');
-    if (res.ok) {
-      const data = await res.json();
-      updateDriveUI(!!data.driveConnected);
-    }
+    osc.stop(ctx.currentTime + 0.3);
   } catch (e) {}
 }
 
-// Inicializar Conexión SSE en tiempo real
-let sseReconnectAttempts = 0;
-function initEventSource() {
-  const evtSource = new EventSource('/api/events');
-
-  evtSource.addEventListener('init', (e) => {
-    const data = JSON.parse(e.data);
-    serverData = { ...serverData, ...data };
-    updateQrDisplay();
-    updateDriveUI(data.driveConnected);
-    
-    // Guardar pairId en móvil de forma permanente
-    if (data.pairId) {
-      localStorage.setItem('airlink_pair_id', data.pairId);
-      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-        navigator.serviceWorker.controller.postMessage({ type: 'SAVE_PAIR_ID', pairId: data.pairId });
-      }
-    }
-
-    fetchFiles();
-    if (data.messages) {
-      renderMessages(data.messages);
-    } else {
-      fetchMessages();
-    }
-  });
-
-  evtSource.addEventListener('drive_status_updated', (e) => {
-    const data = JSON.parse(e.data);
-    updateDriveUI(data.connected);
-    if (data.connected) {
-      playChime();
-      showToast('☁️ ¡Google Drive vinculado exitosamente!');
-    }
-  });
-
-  evtSource.addEventListener('tunnel_ready', (e) => {
-    const data = JSON.parse(e.data);
-    serverData = { ...serverData, ...data };
-    updateQrDisplay();
-    showToast('Túnel seguro de Internet activo');
-  });
-
-  evtSource.addEventListener('pair_reset', (e) => {
-    const data = JSON.parse(e.data);
-    serverData = { ...serverData, ...data };
-    updateQrDisplay();
-    showToast('Código de vinculación regenerado');
-  });
-
-  evtSource.addEventListener('files_updated', (e) => {
-    const data = JSON.parse(e.data);
-    playChime();
-    showToast(data.message || 'Nuevo archivo transferido');
-    if (data.totalFiles) {
-      renderFiles(data.totalFiles);
-    } else {
-      fetchFiles();
-    }
-  });
-
-  evtSource.addEventListener('new_message', (e) => {
-    const data = JSON.parse(e.data);
-    renderMessages(data.totalMessages);
-    const myDevice = isMobile ? 'mobile' : 'laptop';
-    if (data.message && data.message.device !== myDevice) {
-      playChime();
-      const snippet = data.message.text.length > 35 ? data.message.text.slice(0, 35) + '...' : data.message.text;
-      showToast(`💬 ${data.message.sender}: ${snippet}`);
-      if (activeMainTab !== 'chat' && chatUnreadDot) {
-        chatUnreadDot.style.display = 'block';
-      }
-    }
-  });
-
-  evtSource.addEventListener('messages_updated', (e) => {
-    const data = JSON.parse(e.data);
-    renderMessages(data.totalMessages);
-  });
-
-  evtSource.onerror = async () => {
-    document.getElementById('connectionStatus').textContent = 'Reconectando...';
-    // Si estamos en el celular y la conexión falló, buscar automáticamente la nueva dirección de la laptop
-    if (isMobile) {
-      sseReconnectAttempts++;
-      if (sseReconnectAttempts >= 2) {
-        const pairId = localStorage.getItem('airlink_pair_id');
-        if (pairId) {
-          try {
-            const res = await fetch(`https://ntfy.sh/airlink_hub_${pairId}/json?poll=1&since=24h`);
-            if (res.ok) {
-              const text = await res.text();
-              const lines = text.trim().split('\n').filter(Boolean);
-              for (let i = lines.length - 1; i >= 0; i--) {
-                const parsed = JSON.parse(lines[i]);
-                if (parsed.message) {
-                  const d = JSON.parse(parsed.message);
-                  if (d && d.publicUrl && d.publicUrl !== window.location.origin) {
-                    window.location.href = d.publicUrl;
-                    return;
-                  }
-                }
-              }
-            }
-          } catch (err) {}
-        }
-      }
-    }
-  };
-
-  evtSource.onopen = () => {
-    sseReconnectAttempts = 0;
-    document.getElementById('connectionStatus').textContent = 'Conectado en vivo';
-  };
+// -------------------------------------------------------------
+// Google Identity Services (GIS) & Autenticación
+// -------------------------------------------------------------
+function getClientId() {
+  return localStorage.getItem('airlink_client_id') || DEFAULT_CLIENT_ID;
 }
 
-// Obtener lista de archivos del servidor
-async function fetchFiles() {
-  try {
-    const res = await fetch('/api/files');
-    const files = await res.json();
-    renderFiles(files);
-  } catch (err) {
-    console.error('Error al obtener archivos:', err);
+function initGoogleAuth() {
+  if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) {
+    setTimeout(initGoogleAuth, 300);
+    return;
   }
+
+  try {
+    tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: getClientId(),
+      scope: SCOPES,
+      callback: async (tokenResponse) => {
+        if (tokenResponse && tokenResponse.access_token) {
+          accessToken = tokenResponse.access_token;
+          const expiresIn = parseInt(tokenResponse.expires_in || '3599', 10);
+          tokenExpiry = Date.now() + expiresIn * 1000;
+          localStorage.setItem('airlink_drive_token', accessToken);
+          localStorage.setItem('airlink_token_expiry', String(tokenExpiry));
+          
+          updateAuthUI(true);
+          showToast('☁️ Conectado con éxito a Google Drive');
+          playChime();
+          
+          await initializeDriveFolder();
+          loadAllData();
+          startSyncPolling();
+        }
+      }
+    });
+
+    if (isTokenValid()) {
+      updateAuthUI(true);
+      initializeDriveFolder().then(() => {
+        loadAllData();
+        startSyncPolling();
+      });
+    } else {
+      updateAuthUI(false);
+    }
+  } catch (err) {
+    console.error('Error inicializando Google Auth:', err);
+    updateAuthUI(false);
+  }
+}
+
+function isTokenValid() {
+  return accessToken && tokenExpiry > Date.now() + 60000;
+}
+
+function requestDriveAccess() {
+  if (!tokenClient) {
+    initGoogleAuth();
+  }
+  if (tokenClient) {
+    tokenClient.requestAccessToken({ prompt: 'consent' });
+  } else {
+    showToast('Cargando servicio de Google... intenta en unos segundos');
+  }
+}
+
+function updateAuthUI(connected) {
+  if (connected) {
+    if (btnDriveAuth) {
+      btnDriveAuth.classList.add('connected');
+      btnDriveAuth.title = 'Google Drive Conectado';
+    }
+    if (driveAuthText) driveAuthText.textContent = 'Drive Conectado ✓';
+    if (driveBanner) driveBanner.classList.add('connected');
+    if (driveBannerTitle) driveBannerTitle.textContent = '☁️ Google Drive Activo';
+    if (driveBannerDesc) driveBannerDesc.textContent = 'Tus archivos se guardan directamente en tu carpeta "AirLink Express" de Google Drive.';
+    if (btnDriveAction) {
+      btnDriveAction.classList.add('connected');
+      btnDriveAction.textContent = '✓ Conectado';
+      btnDriveAction.onclick = null;
+    }
+  } else {
+    if (btnDriveAuth) {
+      btnDriveAuth.classList.remove('connected');
+      btnDriveAuth.title = 'Conectar con Google Drive';
+    }
+    if (driveAuthText) driveAuthText.textContent = 'Conectar Drive';
+    if (driveBanner) driveBanner.classList.remove('connected');
+    if (driveBannerTitle) driveBannerTitle.textContent = 'Conectar con Google Drive';
+    if (driveBannerDesc) driveBannerDesc.textContent = 'Inicia sesión una sola vez para sincronizar tus archivos, capturas y textos entre tu celular y tu laptop sin límites ni túneles.';
+    if (btnDriveAction) {
+      btnDriveAction.classList.remove('connected');
+      btnDriveAction.textContent = 'Conectar con Google';
+      btnDriveAction.onclick = requestDriveAccess;
+    }
+  }
+}
+
+if (btnDriveAuth) btnDriveAuth.addEventListener('click', requestDriveAccess);
+if (btnDriveAction) btnDriveAction.addEventListener('click', requestDriveAccess);
+
+// -------------------------------------------------------------
+// Operaciones con Google Drive API v3
+// -------------------------------------------------------------
+async function fetchWithAuth(url, options = {}) {
+  if (!isTokenValid()) {
+    showToast('Sesión de Google Drive expirada. Vuelve a conectar.');
+    updateAuthUI(false);
+    throw new Error('Token expirado');
+  }
+  const headers = {
+    ...options.headers,
+    Authorization: `Bearer ${accessToken}`
+  };
+  const res = await fetch(url, { ...options, headers });
+  if (res.status === 401) {
+    updateAuthUI(false);
+    showToast('Sesión expirada. Toca "Conectar Drive" para renovar.');
+    throw new Error('401 Unauthorized');
+  }
+  return res;
+}
+
+// Localizar o crear la carpeta "AirLink Express"
+async function initializeDriveFolder() {
+  if (airlinkFolderId) {
+    // Verificar si aún existe
+    try {
+      const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${airlinkFolderId}?fields=id,name,trashed`);
+      if (res.ok) {
+        const d = await res.json();
+        if (d && !d.trashed) return airlinkFolderId;
+      }
+    } catch (e) {}
+  }
+
+  try {
+    const q = encodeURIComponent("mimeType='application/vnd.google-apps.folder' and name='AirLink Express' and trashed=false");
+    const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name)`);
+    const data = await res.json();
+
+    if (data.files && data.files.length > 0) {
+      airlinkFolderId = data.files[0].id;
+      localStorage.setItem('airlink_folder_id', airlinkFolderId);
+      return airlinkFolderId;
+    }
+
+    // Crear carpeta
+    const createRes = await fetchWithAuth('https://www.googleapis.com/drive/v3/files', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'AirLink Express',
+        mimeType: 'application/vnd.google-apps.folder'
+      })
+    });
+    const folder = await createRes.json();
+    airlinkFolderId = folder.id;
+    localStorage.setItem('airlink_folder_id', airlinkFolderId);
+    return airlinkFolderId;
+  } catch (err) {
+    console.error('Error buscando/creando carpeta AirLink Express:', err);
+    return null;
+  }
+}
+
+// Cargar lista de archivos de Google Drive
+async function loadDriveFiles() {
+  if (!airlinkFolderId) await initializeDriveFolder();
+  if (!airlinkFolderId) return;
+
+  try {
+    const q = encodeURIComponent(`'${airlinkFolderId}' in parents and trashed=false and name != 'mensajes.json'`);
+    const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,size,mimeType,createdTime,webViewLink,webContentLink,thumbnailLink)&orderBy=createdTime desc&pageSize=100`;
+    
+    const res = await fetchWithAuth(url);
+    if (!res.ok) return;
+    const data = await res.json();
+    const newFiles = (data.files || []).map(f => {
+      const isImg = f.mimeType && f.mimeType.startsWith('image/');
+      const isVid = f.mimeType && f.mimeType.startsWith('video/');
+      const isAud = f.mimeType && f.mimeType.startsWith('audio/');
+      const isDoc = f.mimeType && (f.mimeType.includes('word') || f.mimeType.includes('document'));
+      const isPdf = f.mimeType && f.mimeType.includes('pdf');
+
+      return {
+        id: f.id,
+        name: f.name,
+        size: parseInt(f.size || '0', 10),
+        formattedSize: formatBytes(parseInt(f.size || '0', 10)),
+        createdAt: f.createdTime,
+        mimeType: f.mimeType,
+        webViewLink: f.webViewLink,
+        webContentLink: f.webContentLink,
+        thumbnailLink: f.thumbnailLink,
+        isImage: isImg,
+        isVideo: isVid,
+        isAudio: isAud,
+        isPdf: isPdf,
+        isDoc: isDoc
+      };
+    });
+
+    // Detectar si llegaron archivos nuevos para avisar con sonido
+    if (filesData.length > 0 && newFiles.length > filesData.length) {
+      playChime();
+      showToast('☁️ ¡Nuevo archivo disponible en AirLink Express!');
+    }
+
+    filesData = newFiles;
+    renderFiles(filesData);
+  } catch (e) {
+    console.error('Error cargando archivos de Drive:', e);
+  }
+}
+
+function formatBytes(bytes, decimals = 1) {
+  if (!bytes || bytes === 0) return 'Archivo';
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 }
 
 // Renderizar la lista de archivos
 function renderFiles(files) {
-  filesData = files || [];
-  const count = filesData.length;
-  filesCount.textContent = count;
-  if (tabFilesBadge) tabFilesBadge.textContent = count;
+  if (filesCount) filesCount.textContent = files.length;
+  if (tabFilesBadge) tabFilesBadge.textContent = files.length;
 
   if (!files || files.length === 0) {
     filesList.innerHTML = '';
@@ -431,18 +352,19 @@ function renderFiles(files) {
     const card = document.createElement('div');
     card.className = 'file-card';
 
-    // Determinar thumbnail o icono según tipo de archivo
     let thumbHtml = '📄';
-    if (file.isImage) {
-      thumbHtml = `<img src="${file.previewUrl}" alt="${file.name}" loading="lazy">`;
+    if (file.thumbnailLink) {
+      thumbHtml = `<img src="${file.thumbnailLink}" alt="${file.name}" loading="lazy">`;
+    } else if (file.isImage) {
+      thumbHtml = '🖼️';
     } else if (file.isVideo) {
       thumbHtml = '🎥';
     } else if (file.isAudio) {
       thumbHtml = '🎵';
     } else if (file.isPdf) {
       thumbHtml = '📕';
-    } else if (/\.(zip|rar|7z|tar|gz)$/i.test(file.name)) {
-      thumbHtml = '📦';
+    } else if (file.isDoc) {
+      thumbHtml = '📝';
     }
 
     const dateFormatted = new Date(file.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -456,14 +378,14 @@ function renderFiles(files) {
         </div>
       </div>
       <div class="file-actions">
-        <button class="btn-file-action share" onclick="shareFile('${file.id}', this)" title="Compartir directo a WhatsApp u otra app">
+        <button class="btn-file-action share" onclick="shareDriveFile('${file.id}', this)" title="Compartir directo a WhatsApp u otra app">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
           <span class="share-btn-label">Compartir</span>
         </button>
-        <a href="${file.url}" download class="btn-file-action" title="Descargar">
+        <button class="btn-file-action" onclick="downloadDriveFile('${file.id}', '${file.name}', '${file.mimeType}')" title="Descargar">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-        </a>
-        <button class="btn-file-action delete" onclick="deleteFile('${file.id}')" title="Eliminar">
+        </button>
+        <button class="btn-file-action delete" onclick="deleteDriveFile('${file.id}')" title="Eliminar de Drive">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
         </button>
       </div>
@@ -473,343 +395,358 @@ function renderFiles(files) {
   });
 }
 
-// Compartir archivo directamente a WhatsApp u otras apps del celular (Web Share API Level 2)
-async function shareFile(id, btnEl) {
-  const file = filesData.find(f => f.id === id);
+// Descargar archivo desde Google Drive
+window.downloadDriveFile = async function(fileId, fileName, mimeType) {
+  try {
+    showToast(`Descargando ${fileName}...`);
+    let downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+    let isExport = false;
+
+    if (mimeType && mimeType.startsWith('application/vnd.google-apps.document')) {
+      downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/vnd.openxmlformats-officedocument.wordprocessingml.document`;
+      if (!fileName.endsWith('.docx')) fileName += '.docx';
+      isExport = true;
+    } else if (mimeType && mimeType.startsWith('application/vnd.google-apps.spreadsheet')) {
+      downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`;
+      if (!fileName.endsWith('.xlsx')) fileName += '.xlsx';
+      isExport = true;
+    }
+
+    const res = await fetchWithAuth(downloadUrl);
+    if (!res.ok) throw new Error('No se pudo descargar el archivo');
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+    showToast(`✓ Descarga de ${fileName} lista`);
+  } catch (err) {
+    showToast('Error al descargar el archivo de Drive');
+  }
+};
+
+// Compartir directamente a WhatsApp u otras apps móviles (Web Share API)
+window.shareDriveFile = async function(fileId, btnEl) {
+  const file = filesData.find(f => f.id === fileId);
   if (!file) return;
 
-  if (!navigator.share) {
-    showToast('Tu navegador no soporta compartir directo. Descargando archivo...');
-    window.location.href = file.url;
-    return;
-  }
-
-  const originalHtml = btnEl ? btnEl.innerHTML : '';
   if (btnEl) {
-    btnEl.disabled = true;
     btnEl.classList.add('loading');
-    btnEl.innerHTML = `<span class="share-btn-label">⏳...</span>`;
+    btnEl.innerHTML = `<span>⏳...</span>`;
   }
 
   try {
-    const res = await fetch(file.previewUrl);
-    if (!res.ok) throw new Error('No se pudo obtener el archivo');
+    let downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+    let fileName = file.name;
+    let mimeType = file.mimeType || 'application/octet-stream';
+
+    if (mimeType.startsWith('application/vnd.google-apps.document')) {
+      downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/vnd.openxmlformats-officedocument.wordprocessingml.document`;
+      mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      if (!fileName.endsWith('.docx')) fileName += '.docx';
+    }
+
+    const res = await fetchWithAuth(downloadUrl);
     const blob = await res.blob();
-    const mimeType = getMimeTypeFromName(file.name, blob.type);
-    const fileObj = new File([blob], file.name, { type: mimeType });
+    const fileObj = new File([blob], fileName, { type: mimeType });
 
     if (navigator.canShare && navigator.canShare({ files: [fileObj] })) {
-      try {
-        await navigator.share({
-          files: [fileObj],
-          title: file.name
-        });
-      } catch (shareErr) {
-        if (shareErr.name === 'AbortError') return;
-        // Si el archivo tardó varios segundos en prepararse y el navegador pide un toque adicional
-        if (shareErr.name === 'NotAllowedError') {
-          pendingShareFileObj = fileObj;
-          const modal = document.getElementById('shareReadyModal');
-          const nameEl = document.getElementById('shareReadyFileName');
-          if (nameEl) nameEl.textContent = `"${file.name}" está listo. Toca el botón para enviarlo directo por WhatsApp.`;
-          if (modal) modal.style.display = 'flex';
-          return;
-        }
-        throw shareErr;
-      }
-    } else {
-      // Fallback: compartir enlace si el navegador no soporta compartir archivos binarios
       await navigator.share({
-        title: file.name,
-        text: `Archivo: ${file.name}`,
-        url: window.location.origin + file.url
+        files: [fileObj],
+        title: fileName
       });
+    } else if (file.webViewLink) {
+      if (navigator.share) {
+        await navigator.share({
+          title: fileName,
+          url: file.webViewLink
+        });
+      } else {
+        window.open(file.webViewLink, '_blank');
+      }
     }
-  } catch (err) {
-    if (err.name !== 'AbortError') {
-      showToast('No se pudo compartir directamente');
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      showToast('No se pudo abrir el menú de compartir');
     }
   } finally {
     if (btnEl) {
-      btnEl.disabled = false;
       btnEl.classList.remove('loading');
-      btnEl.innerHTML = originalHtml;
+      btnEl.innerHTML = `
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
+        <span class="share-btn-label">Compartir</span>
+      `;
     }
   }
-}
-window.shareFile = shareFile;
+};
 
-// Eliminar archivo
-async function deleteFile(id) {
-  if (!confirm('¿Deseas eliminar este archivo?')) return;
+// Eliminar archivo de Drive
+window.deleteDriveFile = async function(fileId) {
+  if (!confirm('¿Deseas eliminar este archivo de Google Drive?')) return;
   try {
-    const res = await fetch(`/api/files/${id}`, { method: 'DELETE' });
+    const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+      method: 'DELETE'
+    });
     if (res.ok) {
-      showToast('Archivo eliminado');
+      showToast('Archivo eliminado de Google Drive');
+      filesData = filesData.filter(f => f.id !== fileId);
+      renderFiles(filesData);
     }
   } catch (err) {
-    showToast('Error al eliminar');
+    showToast('Error al eliminar archivo');
   }
-}
+};
 
-// Subida de archivos con progreso en tiempo real
-function uploadFiles(files) {
-  if (!files || files.length === 0) return;
-
-  const formData = new FormData();
-  for (let i = 0; i < files.length; i++) {
-    formData.append('files', files[i]);
-  }
-
-  const senderType = isMobile ? 'mobile' : 'laptop';
-  const xhr = new XMLHttpRequest();
-
-  progressContainer.style.display = 'flex';
-  progressBarFill.style.width = '0%';
-  progressPercent.textContent = '0%';
-  progressInfo.textContent = `Preparando ${files.length} archivo(s)...`;
-
-  xhr.upload.addEventListener('progress', (e) => {
-    if (e.lengthComputable) {
-      const percent = Math.round((e.loaded / e.total) * 100);
-      progressBarFill.style.width = `${percent}%`;
-      progressPercent.textContent = `${percent}%`;
-      
-      const loadedMb = (e.loaded / (1024 * 1024)).toFixed(1);
-      const totalMb = (e.total / (1024 * 1024)).toFixed(1);
-      progressInfo.textContent = `${loadedMb} MB de ${totalMb} MB transferidos`;
-    }
-  });
-
-  xhr.addEventListener('load', () => {
-    progressContainer.style.display = 'none';
-    if (xhr.status >= 200 && xhr.status < 300) {
-      playChime();
-      showToast('¡Transferencia completada con éxito!');
-      fileInput.value = '';
-      cameraInput.value = '';
-    } else {
-      showToast('Hubo un error al transferir los archivos');
-    }
-  });
-
-  xhr.addEventListener('error', () => {
-    progressContainer.style.display = 'none';
-    showToast('Error de red al transferir');
-  });
-
-  xhr.open('POST', `/api/upload?sender=${senderType}`);
-  xhr.send(formData);
-}
-
-// Controladores de selección de archivos
-btnSelectFiles.addEventListener('click', (e) => {
-  e.stopPropagation();
-  fileInput.click();
-});
-
-if (btnCamera) {
-  btnCamera.addEventListener('click', (e) => {
-    e.stopPropagation();
-    cameraInput.click();
-  });
-}
-
-// Generar nombre descriptivo con timestamp para la captura
-function generateCaptureFilename(ext = '.png') {
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
-  return `Captura_${dateStr}${ext}`;
-}
-
-// Subir una captura o imagen proveniente del portapapeles
-function handlePastedImage(blob) {
-  const ext = blob.type === 'image/jpeg' ? '.jpg' : '.png';
-  const filename = generateCaptureFilename(ext);
-  const file = new File([blob], filename, { type: blob.type || 'image/png' });
-  showToast(`📸 Captura detectada: ${filename}`);
-  uploadFiles([file]);
-}
-
-// Evento de clic en el botón "Pegar Captura"
-if (btnPasteCapture) {
-  btnPasteCapture.addEventListener('click', async (e) => {
-    e.stopPropagation(); // Evitar abrir selector de archivos de dropZone
-    try {
-      if (navigator.clipboard && navigator.clipboard.read) {
-        const clipboardItems = await navigator.clipboard.read();
-        let found = false;
-        for (const item of clipboardItems) {
-          for (const type of item.types) {
-            if (type.startsWith('image/')) {
-              const blob = await item.getType(type);
-              handlePastedImage(blob);
-              found = true;
-              return;
-            }
-          }
-        }
-        if (!found) {
-          showToast('No hay una imagen copiada. Toma una captura y presiona Ctrl+V.');
-        }
-      } else {
-        showToast('Presiona Ctrl+V para pegar tu captura de pantalla.');
-      }
-    } catch (err) {
-      // Bloqueo de permisos o navegador incompatible con lectura async directa
-      showToast('Presiona Ctrl+V para pegar la captura directamente.');
-    }
-  });
-}
-
-// Listener de atajo de teclado Ctrl+V (paste) en la pestaña "Archivos"
-window.addEventListener('paste', (e) => {
-  // Solo procesar si estamos en la pestaña Archivos
-  if (activeMainTab !== 'files') return;
-
-  // Evitar interferir si el usuario está enfocado en un campo de texto interactivo
-  const activeTag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
-  if (activeTag === 'input' || activeTag === 'textarea') return;
-
-  const clipboardData = e.clipboardData || window.clipboardData;
-  if (!clipboardData) return;
-
-  // 1. Si se copiaron archivos en el explorador de Windows
-  if (clipboardData.files && clipboardData.files.length > 0) {
-    e.preventDefault();
-    showToast(`Pegando ${clipboardData.files.length} archivo(s)...`);
-    uploadFiles(clipboardData.files);
+// -------------------------------------------------------------
+// Subida de Archivos a Google Drive
+// -------------------------------------------------------------
+async function uploadFiles(files) {
+  if (!isTokenValid()) {
+    showToast('Inicia sesión en Google Drive primero');
+    requestDriveAccess();
     return;
   }
+  if (!airlinkFolderId) await initializeDriveFolder();
 
-  // 2. Si se copió una imagen o captura de pantalla
-  const items = clipboardData.items;
-  if (items) {
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      if (item.type && item.type.startsWith('image/')) {
-        e.preventDefault();
-        const blob = item.getAsFile();
-        if (blob) {
-          handlePastedImage(blob);
-          return;
+  progressContainer.style.display = 'flex';
+  const total = files.length;
+  let completed = 0;
+
+  for (let i = 0; i < total; i++) {
+    const file = files[i];
+    progressTitle.textContent = `Subiendo ${file.name}... (${i + 1}/${total})`;
+    progressPercent.textContent = `${Math.round(((i) / total) * 100)}%`;
+    progressBarFill.style.width = `${Math.round(((i) / total) * 100)}%`;
+    progressInfo.textContent = `${formatBytes(file.size)}`;
+
+    try {
+      const metadata = {
+        name: file.name,
+        parents: [airlinkFolderId]
+      };
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+      form.append('file', file);
+
+      await fetchWithAuth('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+        method: 'POST',
+        body: form
+      });
+      completed++;
+    } catch (e) {
+      console.error('Error subiendo archivo:', file.name, e);
+    }
+  }
+
+  progressBarFill.style.width = '100%';
+  progressPercent.textContent = '100%';
+  progressTitle.textContent = '¡Archivos subidos a Google Drive!';
+  playChime();
+  showToast(`¡${completed} archivo(s) guardado(s) en tu Drive!`);
+
+  setTimeout(() => {
+    progressContainer.style.display = 'none';
+    progressBarFill.style.width = '0%';
+    fileInput.value = '';
+    cameraInput.value = '';
+    loadDriveFiles();
+  }, 1200);
+}
+
+// -------------------------------------------------------------
+// Pegar Captura de Pantalla con Ctrl+V (Directo a Drive)
+// -------------------------------------------------------------
+window.addEventListener('paste', async (e) => {
+  if (activeMainTab === 'chat' && document.activeElement === chatInput) {
+    return; // Si está escribiendo texto, dejar pegar texto normalmente
+  }
+
+  const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+  let imageFound = false;
+
+  for (const item of items) {
+    if (item.type.indexOf('image') !== -1) {
+      imageFound = true;
+      const blob = item.getAsFile();
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+      const captureFile = new File([blob], `Captura_${timestamp}.png`, { type: 'image/png' });
+
+      showToast('📋 Captura detectada en portapapeles. Subiendo a Drive...');
+      await uploadFiles([captureFile]);
+      break;
+    }
+  }
+
+  if (!imageFound && btnPasteCapture && e.target === btnPasteCapture) {
+    showToast('No se encontró ninguna imagen en el portapapeles');
+  }
+});
+
+if (btnPasteCapture) {
+  btnPasteCapture.addEventListener('click', async () => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.read) {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const imageType = item.types.find(type => type.startsWith('image/'));
+          if (imageType) {
+            const blob = await item.getType(imageType);
+            const now = new Date();
+            const pad = (n) => String(n).padStart(2, '0');
+            const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+            const file = new File([blob], `Captura_${timestamp}.png`, { type: imageType });
+            showToast('📋 Subiendo captura del portapapeles...');
+            await uploadFiles([file]);
+            return;
+          }
+        }
+      }
+      showToast('Copia una captura con Win+Shift+S y presiona Ctrl+V');
+    } catch (err) {
+      showToast('Presiona Ctrl+V directamente para pegar la captura');
+    }
+  });
+}
+
+// -------------------------------------------------------------
+// Drag & Drop y Selección
+// -------------------------------------------------------------
+if (btnSelectFiles) btnSelectFiles.addEventListener('click', () => fileInput.click());
+if (btnCamera) btnCamera.addEventListener('click', () => cameraInput.click());
+
+if (fileInput) {
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files.length > 0) uploadFiles(fileInput.files);
+  });
+}
+
+if (cameraInput) {
+  cameraInput.addEventListener('change', () => {
+    if (cameraInput.files.length > 0) uploadFiles(cameraInput.files);
+  });
+}
+
+if (dropZone) {
+  dropZone.addEventListener('click', (e) => {
+    if (e.target.closest('.btn')) return;
+    fileInput.click();
+  });
+
+  ['dragenter', 'dragover'].forEach(name => {
+    dropZone.addEventListener(name, (e) => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+  });
+
+  ['dragleave', 'drop'].forEach(name => {
+    dropZone.addEventListener(name, (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+    });
+  });
+
+  dropZone.addEventListener('drop', (e) => {
+    const dt = e.dataTransfer;
+    if (dt && dt.files && dt.files.length > 0) {
+      uploadFiles(dt.files);
+    }
+  });
+}
+
+if (btnRefresh) {
+  btnRefresh.addEventListener('click', () => {
+    btnRefresh.style.transform = 'rotate(180deg)';
+    setTimeout(() => { btnRefresh.style.transform = ''; }, 400);
+    loadAllData();
+    showToast('Actualizando archivos...');
+  });
+}
+
+// -------------------------------------------------------------
+// Texto y Portapapeles Sincronizado en Drive (mensajes.json)
+// -------------------------------------------------------------
+async function loadDriveMessages() {
+  if (!airlinkFolderId) await initializeDriveFolder();
+  if (!airlinkFolderId) return;
+
+  try {
+    if (!messagesFileId) {
+      const q = encodeURIComponent(`'${airlinkFolderId}' in parents and trashed=false and name = 'mensajes.json'`);
+      const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
+      const data = await res.json();
+      if (data.files && data.files.length > 0) {
+        messagesFileId = data.files[0].id;
+        localStorage.setItem('airlink_messages_file_id', messagesFileId);
+      }
+    }
+
+    if (messagesFileId) {
+      const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${messagesFileId}?alt=media`);
+      if (res.ok) {
+        const msgs = await res.json();
+        if (Array.isArray(msgs)) {
+          if (messagesData.length > 0 && msgs.length > messagesData.length) {
+            playChime();
+            showToast('💬 Nuevo texto recibido');
+            if (activeMainTab !== 'chat' && chatUnreadDot) chatUnreadDot.style.display = 'block';
+          }
+          messagesData = msgs;
+          renderMessages(messagesData);
         }
       }
     }
+  } catch (e) {
+    console.error('Error cargando mensajes de Drive:', e);
   }
-});
+}
 
-fileInput.addEventListener('change', () => {
-  if (fileInput.files.length > 0) {
-    uploadFiles(fileInput.files);
-  }
-});
+async function saveDriveMessages(msgs) {
+  if (!airlinkFolderId) await initializeDriveFolder();
+  if (!airlinkFolderId) return;
 
-cameraInput.addEventListener('change', () => {
-  if (cameraInput.files.length > 0) {
-    uploadFiles(cameraInput.files);
-  }
-});
+  const content = JSON.stringify(msgs, null, 2);
 
-// Drag and drop
-dropZone.addEventListener('click', () => {
-  fileInput.click();
-});
-
-['dragenter', 'dragover'].forEach(name => {
-  dropZone.addEventListener(name, (e) => {
-    e.preventDefault();
-    dropZone.classList.add('dragover');
-  });
-});
-
-['dragleave', 'drop'].forEach(name => {
-  dropZone.addEventListener(name, (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('dragover');
-  });
-});
-
-dropZone.addEventListener('drop', (e) => {
-  const dt = e.dataTransfer;
-  const files = dt.files;
-  if (files && files.length > 0) {
-    uploadFiles(files);
-  }
-});
-
-btnRefresh.addEventListener('click', async () => {
-  btnRefresh.style.transform = 'rotate(180deg)';
-  setTimeout(() => { btnRefresh.style.transform = ''; }, 400);
-  fetchFiles();
   try {
-    await fetch('/api/drive/sync', { method: 'POST' });
-    fetchFiles();
-  } catch (e) {}
-});
+    if (messagesFileId) {
+      // Actualizar archivo existente
+      await fetchWithAuth(`https://www.googleapis.com/upload/drive/v3/files/${messagesFileId}?uploadType=media`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: content
+      });
+    } else {
+      // Crear archivo inicial
+      const metadata = {
+        name: 'mensajes.json',
+        parents: [airlinkFolderId],
+        mimeType: 'application/json'
+      };
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+      form.append('file', new Blob([content], { type: 'application/json' }));
 
-// -------------------------------------------------------------
-// Control de Pestañas (Archivos vs Texto & Portapapeles)
-// -------------------------------------------------------------
-function switchMainTab(tab) {
-  activeMainTab = tab;
-  if (tab === 'files') {
-    if (tabNavFiles) {
-      tabNavFiles.classList.add('active');
-      tabNavFiles.setAttribute('aria-selected', 'true');
+      const res = await fetchWithAuth('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+        method: 'POST',
+        body: form
+      });
+      const data = await res.json();
+      if (data && data.id) {
+        messagesFileId = data.id;
+        localStorage.setItem('airlink_messages_file_id', messagesFileId);
+      }
     }
-    if (tabNavChat) {
-      tabNavChat.classList.remove('active');
-      tabNavChat.setAttribute('aria-selected', 'false');
-    }
-    if (filesTabSection) filesTabSection.style.display = 'flex';
-    if (chatTabSection) chatTabSection.style.display = 'none';
-  } else {
-    if (tabNavChat) {
-      tabNavChat.classList.add('active');
-      tabNavChat.setAttribute('aria-selected', 'true');
-    }
-    if (tabNavFiles) {
-      tabNavFiles.classList.remove('active');
-      tabNavFiles.setAttribute('aria-selected', 'false');
-    }
-    if (chatTabSection) chatTabSection.style.display = 'flex';
-    if (filesTabSection) filesTabSection.style.display = 'none';
-    if (chatUnreadDot) chatUnreadDot.style.display = 'none'; // Quitar indicador de no leídos
-    if (chatInput) {
-      setTimeout(() => chatInput.focus(), 60);
-    }
-    if (chatMessagesList) {
-      chatMessagesList.scrollTop = 0;
-    }
+  } catch (e) {
+    console.error('Error guardando mensajes en Drive:', e);
   }
 }
-window.switchMainTab = switchMainTab;
 
-// -------------------------------------------------------------
-// Funciones de Chat y Portapapeles
-// -------------------------------------------------------------
-function escapeHtml(text) {
-  const map = {
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#039;'
-  };
-  return text.replace(/[&<>"']/g, m => map[m]);
-}
-
-function linkify(text) {
-  const safeText = escapeHtml(text);
-  const urlRegex = /(https?:\/\/[^\s]+)/g;
-  return safeText.replace(urlRegex, (url) => {
-    return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="msg-url-link">${url}</a>`;
-  });
-}
-
-// Renderizar la lista de mensajes
 function renderMessages(messages) {
   messagesData = messages || [];
   const count = messagesData.length;
@@ -838,80 +775,23 @@ function renderMessages(messages) {
     const date = new Date(msg.createdAt);
     const timeFormatted = isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const senderIcon = msg.device === 'mobile' ? '📱' : '💻';
-    const senderLabel = `${senderIcon} ${msg.sender}${isMe ? ' (Tú)' : ''}`;
-
-    const formattedBody = linkify(msg.text);
 
     card.innerHTML = `
-      <div class="message-header">
-        <div class="message-sender-info">
-          <span class="message-sender-badge">${senderLabel}</span>
-          <span class="message-time">${timeFormatted}</span>
-        </div>
-        <div class="message-actions">
-          <button class="btn-msg-share" title="Compartir directo a WhatsApp u otra app">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
-            <span>Compartir</span>
-          </button>
-          <button class="btn-msg-copy" title="Copiar al portapapeles">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-            <span>Copiar</span>
-          </button>
-          <button class="btn-msg-delete" title="Eliminar este mensaje">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-          </button>
-        </div>
+      <div class="message-meta-row">
+        <span class="message-sender">${senderIcon} ${msg.sender} ${isMe ? '(Tú)' : ''}</span>
+        <span class="message-time">${timeFormatted}</span>
       </div>
-      <div class="message-body">${formattedBody}</div>
-    `;
-
-    // Botón Compartir Texto (WhatsApp / Nativo)
-    const shareBtn = card.querySelector('.btn-msg-share');
-    if (shareBtn) {
-      shareBtn.addEventListener('click', async () => {
-        if (navigator.share) {
-          try {
-            await navigator.share({ text: msg.text });
-          } catch (e) {}
-        } else {
-          window.open(`https://wa.me/?text=${encodeURIComponent(msg.text)}`, '_blank');
-        }
-      });
-    }
-
-    // Botón Copiar
-    const copyBtn = card.querySelector('.btn-msg-copy');
-    copyBtn.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(msg.text);
-      } catch (err) {
-        const ta = document.createElement('textarea');
-        ta.value = msg.text;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-      }
-      copyBtn.classList.add('copied');
-      copyBtn.innerHTML = `
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
-        <span>¡Copiado!</span>
-      `;
-      showToast('¡Texto copiado al portapapeles!');
-      setTimeout(() => {
-        copyBtn.classList.remove('copied');
-        copyBtn.innerHTML = `
+      <div class="message-text-content">${linkify(msg.text)}</div>
+      <div class="message-actions-row">
+        <button class="btn-msg-action btn-copy-msg" onclick="copyMessageText('${msg.id}', this)" title="Copiar texto al portapapeles">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-          <span>Copiar</span>
-        `;
-      }, 1800);
-    });
-
-    // Botón Eliminar
-    const delBtn = card.querySelector('.btn-msg-delete');
-    delBtn.addEventListener('click', () => {
-      deleteMessage(msg.id);
-    });
+          <span class="btn-copy-label">Copiar</span>
+        </button>
+        <button class="btn-msg-action delete" onclick="deleteMessage('${msg.id}')" title="Eliminar mensaje">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"></path></svg>
+        </button>
+      </div>
+    `;
 
     chatMessagesList.appendChild(card);
   });
@@ -921,71 +801,72 @@ function renderMessages(messages) {
   }
 }
 
-// Enviar Mensaje
+function linkify(text) {
+  const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+  const safe = (text || '').replace(/[&<>"']/g, m => map[m]);
+  return safe.replace(/(https?:\/\/[^\s]+)/g, url => `<a href="${url}" target="_blank" rel="noopener noreferrer" class="msg-url-link">${url}</a>`);
+}
+
+window.copyMessageText = async function(id, btnEl) {
+  const msg = messagesData.find(m => m.id === id);
+  if (!msg) return;
+  try {
+    await navigator.clipboard.writeText(msg.text);
+    if (btnEl) {
+      const label = btnEl.querySelector('.btn-copy-label');
+      if (label) label.textContent = '¡Copiado!';
+      btnEl.classList.add('copied');
+      setTimeout(() => {
+        if (label) label.textContent = 'Copiar';
+        btnEl.classList.remove('copied');
+      }, 2000);
+    }
+    showToast('¡Texto copiado al portapapeles!');
+  } catch (e) {
+    showToast('No se pudo copiar automáticamente');
+  }
+};
+
+window.deleteMessage = async function(id) {
+  messagesData = messagesData.filter(m => m.id !== id);
+  renderMessages(messagesData);
+  await saveDriveMessages(messagesData);
+  showToast('Mensaje eliminado');
+};
+
 async function sendMessage() {
-  if (!chatInput) return;
-  const text = chatInput.value.trim();
-  if (!text) {
-    chatInput.focus();
-    return;
-  }
+  const text = (chatInput.value || '').trim();
+  if (!text) return;
 
-  if (btnSendText) btnSendText.disabled = true;
-  try {
-    const res = await fetch('/api/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text,
-        sender: isMobile ? 'Celular' : 'Laptop',
-        device: isMobile ? 'mobile' : 'laptop'
-      })
-    });
-    const data = await res.json();
-    if (data.success) {
-      chatInput.value = '';
-      if (chatCharCounter) chatCharCounter.textContent = '0 caracteres';
-      chatInput.focus();
-    } else {
-      showToast(data.error || 'Error al enviar texto');
-    }
-  } catch (err) {
-    showToast('Error de conexión al enviar texto');
-  } finally {
-    if (btnSendText) btnSendText.disabled = false;
-  }
+  const myDevice = isMobile ? 'mobile' : 'laptop';
+  const mySender = isMobile ? 'Celular' : 'Laptop';
+
+  const newMsg = {
+    id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+    text,
+    sender: mySender,
+    device: myDevice,
+    createdAt: new Date().toISOString()
+  };
+
+  messagesData.unshift(newMsg);
+  if (messagesData.length > 300) messagesData.pop();
+
+  chatInput.value = '';
+  if (chatCharCounter) chatCharCounter.textContent = '0 caracteres';
+  renderMessages(messagesData);
+
+  playChime();
+  showToast('Texto enviado');
+
+  await saveDriveMessages(messagesData);
 }
 
-// Eliminar Mensaje individual
-async function deleteMessage(id) {
-  try {
-    const res = await fetch(`/api/messages/${id}`, { method: 'DELETE' });
-    if (res.ok) {
-      showToast('Texto eliminado');
-    }
-  } catch (err) {
-    showToast('Error al eliminar mensaje');
-  }
-}
+if (btnSendText) btnSendText.addEventListener('click', sendMessage);
 
-// Obtener mensajes del servidor
-async function fetchMessages() {
-  try {
-    const res = await fetch('/api/messages');
-    const messages = await res.json();
-    renderMessages(messages);
-  } catch (err) {
-    console.error('Error al obtener mensajes:', err);
-  }
-}
-
-// Controles de entrada de texto
 if (chatInput) {
   chatInput.addEventListener('input', () => {
-    if (chatCharCounter) {
-      const len = chatInput.value.length;
-      chatCharCounter.textContent = `${len} caracter${len === 1 ? '' : 'es'}`;
-    }
+    if (chatCharCounter) chatCharCounter.textContent = `${chatInput.value.length} caracteres`;
   });
 
   chatInput.addEventListener('keydown', (e) => {
@@ -996,10 +877,6 @@ if (chatInput) {
   });
 }
 
-if (btnSendText) {
-  btnSendText.addEventListener('click', sendMessage);
-}
-
 if (btnPasteText) {
   btnPasteText.addEventListener('click', async () => {
     try {
@@ -1008,300 +885,84 @@ if (btnPasteText) {
         if (clipText) {
           const current = chatInput.value;
           chatInput.value = current ? current + (current.endsWith('\n') ? '' : '\n') + clipText : clipText;
-          if (chatCharCounter) {
-            chatCharCounter.textContent = `${chatInput.value.length} caracteres`;
-          }
+          if (chatCharCounter) chatCharCounter.textContent = `${chatInput.value.length} caracteres`;
           chatInput.focus();
           showToast('Texto pegado del portapapeles');
         } else {
-          showToast('El portapapeles está vacío');
-          chatInput.focus();
+          showToast('Portapapeles vacío');
         }
-      } else {
-        chatInput.focus();
-        showToast('Presiona Ctrl+V o mantén presionado para pegar');
       }
-    } catch (err) {
+    } catch (e) {
       chatInput.focus();
-      showToast('Presiona Ctrl+V o mantén presionado para pegar');
+      showToast('Presiona Ctrl+V para pegar');
     }
   });
 }
 
 if (btnClearChat) {
   btnClearChat.addEventListener('click', async () => {
-    if (!messagesData || messagesData.length === 0) {
-      showToast('No hay textos para vaciar');
-      return;
-    }
     if (!confirm('¿Deseas vaciar todo el historial de textos?')) return;
-    try {
-      const res = await fetch('/api/messages', { method: 'DELETE' });
-      if (res.ok) {
-        showToast('Historial de textos vaciado');
-      }
-    } catch (err) {
-      showToast('Error al vaciar textos');
-    }
+    messagesData = [];
+    renderMessages([]);
+    await saveDriveMessages([]);
+    showToast('Historial vaciado');
   });
 }
 
-// Iniciar todo
-initEventSource();
-checkDriveStatus();
-fetchFiles();
-fetchMessages();
+// -------------------------------------------------------------
+// Control de Pestañas
+// -------------------------------------------------------------
+function switchMainTab(tab) {
+  activeMainTab = tab;
+  if (tab === 'files') {
+    if (tabNavFiles) tabNavFiles.classList.add('active');
+    if (tabNavChat) tabNavChat.classList.remove('active');
+    if (filesTabSection) filesTabSection.style.display = 'flex';
+    if (chatTabSection) chatTabSection.style.display = 'none';
+  } else {
+    if (tabNavChat) tabNavChat.classList.add('active');
+    if (tabNavFiles) tabNavFiles.classList.remove('active');
+    if (filesTabSection) filesTabSection.style.display = 'none';
+    if (chatTabSection) chatTabSection.style.display = 'flex';
+    if (chatUnreadDot) chatUnreadDot.style.display = 'none';
+    if (chatMessagesList) chatMessagesList.scrollTop = 0;
+  }
+}
+window.switchMainTab = switchMainTab;
 
-// Auto-refrescar estado al volver al navegador o desbloquear el celular
+// -------------------------------------------------------------
+// Sincronización Automática en Segundo Plano (Polling)
+// -------------------------------------------------------------
+function loadAllData() {
+  if (isTokenValid()) {
+    loadDriveFiles();
+    loadDriveMessages();
+  }
+}
+
+function startSyncPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  // Consultar Drive cada 6 segundos automáticamente
+  pollTimer = setInterval(() => {
+    if (isTokenValid()) {
+      loadDriveFiles();
+      loadDriveMessages();
+    }
+  }, 6000);
+}
+
+// Al enfocar la ventana o volver al navegador, sincronizar de inmediato
+window.addEventListener('focus', loadAllData);
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) {
-    checkDriveStatus();
-    fetchFiles();
-  }
-});
-window.addEventListener('focus', () => {
-  checkDriveStatus();
-  fetchFiles();
+  if (!document.hidden) loadAllData();
 });
 
-// Registrar Service Worker para PWA (Instalar como App) y actualizarlo
+// Iniciar aplicación
+window.addEventListener('DOMContentLoaded', () => {
+  initGoogleAuth();
+});
+
+// PWA Service Worker
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
-      .then((reg) => {
-        reg.update();
-      })
-      .catch(() => {});
-  });
+  navigator.serviceWorker.register('sw.js').catch(() => {});
 }
-
-// -------------------------------------------------------------
-// Control de Vinculación / Escaneo de nuevo QR / Desvinculación
-// -------------------------------------------------------------
-const btnPairOptions = document.getElementById('btnPairOptions');
-const reconnectModal = document.getElementById('reconnectModal');
-const btnCloseModal = document.getElementById('btnCloseModal');
-const btnStartScan = document.getElementById('btnStartScan');
-const btnUnpairDevice = document.getElementById('btnUnpairDevice');
-const scannerContainer = document.getElementById('scannerContainer');
-const modalActions = document.getElementById('modalActions');
-const scannerVideo = document.getElementById('scannerVideo');
-const btnStopScanner = document.getElementById('btnStopScanner');
-const manualUrlInput = document.getElementById('manualUrlInput');
-const btnConnectManual = document.getElementById('btnConnectManual');
-
-let activeMediaStream = null;
-let scanInterval = null;
-
-function openReconnectModal() {
-  if (reconnectModal) reconnectModal.style.display = 'flex';
-}
-
-function closeReconnectModal() {
-  stopCamera();
-  if (reconnectModal) reconnectModal.style.display = 'none';
-}
-
-if (btnPairOptions) {
-  btnPairOptions.addEventListener('click', openReconnectModal);
-}
-
-if (btnCloseModal) {
-  btnCloseModal.addEventListener('click', closeReconnectModal);
-}
-
-if (btnUnpairDevice) {
-  btnUnpairDevice.addEventListener('click', () => {
-    if (confirm('¿Deseas desvincular este dispositivo de tu Laptop? Tendrás que escanear el QR nuevamente para conectar.')) {
-      localStorage.removeItem('airlink_pair_id');
-      showToast('Dispositivo desvinculado');
-      setTimeout(() => {
-        window.location.href = '/conectar.html';
-      }, 300);
-    }
-  });
-}
-
-window.addEventListener('offline', () => {
-  showToast('Sin conexión de red');
-});
-
-function stopCamera() {
-  if (scanInterval) {
-    clearInterval(scanInterval);
-    scanInterval = null;
-  }
-  if (activeMediaStream) {
-    activeMediaStream.getTracks().forEach(track => track.stop());
-    activeMediaStream = null;
-  }
-  if (scannerContainer) scannerContainer.style.display = 'none';
-  if (modalActions) modalActions.style.display = 'flex';
-}
-
-if (btnStopScanner) {
-  btnStopScanner.addEventListener('click', stopCamera);
-}
-
-// Iniciar escáner con la cámara
-if (btnStartScan) {
-  btnStartScan.addEventListener('click', async () => {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert('Tu navegador no permite acceso a la cámara. Por favor escribe o pega la dirección manualmente abajo.');
-      return;
-    }
-
-    try {
-      modalActions.style.display = 'none';
-      scannerContainer.style.display = 'flex';
-
-      activeMediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' } }
-      });
-
-      scannerVideo.srcObject = activeMediaStream;
-      await scannerVideo.play();
-
-      if ('BarcodeDetector' in window) {
-        const detector = new BarcodeDetector({ formats: ['qr_code'] });
-        scanInterval = setInterval(async () => {
-          try {
-            const barcodes = await detector.detect(scannerVideo);
-            if (barcodes && barcodes.length > 0) {
-              const detected = barcodes[0].rawValue;
-              if (detected.startsWith('http://') || detected.startsWith('https://')) {
-                playChime();
-                stopCamera();
-                showToast('¡Código QR detectado! Vinculando...');
-                window.location.href = detected;
-              }
-            }
-          } catch (err) {}
-        }, 250);
-      } else {
-        showToast('Apunta al QR de tu Laptop');
-      }
-    } catch (err) {
-      stopCamera();
-      alert('No se pudo acceder a la cámara. Puedes escribir la dirección IP o enlace abajo para conectar.');
-    }
-  });
-}
-
-// Conexión manual por IP o enlace
-function connectToUrl(inputVal) {
-  let url = inputVal.trim();
-  if (!url) return;
-
-  if (!url.startsWith('http://') && !url.startsWith('https://')) {
-    if (url.includes('trycloudflare.com')) {
-      url = 'https://' + url;
-    } else {
-      url = 'http://' + url;
-    }
-  }
-
-  showToast('Conectando a ' + url + '...');
-  setTimeout(() => {
-    window.location.href = url;
-  }, 300);
-}
-
-if (btnConnectManual) {
-  btnConnectManual.addEventListener('click', () => {
-    connectToUrl(manualUrlInput.value);
-  });
-}
-
-if (manualUrlInput) {
-  manualUrlInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-      connectToUrl(manualUrlInput.value);
-    }
-  });
-}
-
-// -------------------------------------------------------------
-// Modal de confirmación rápida para compartir archivos pesados
-// -------------------------------------------------------------
-const shareReadyModal = document.getElementById('shareReadyModal');
-const btnCloseShareModal = document.getElementById('btnCloseShareModal');
-const btnConfirmShareNow = document.getElementById('btnConfirmShareNow');
-
-if (btnCloseShareModal && shareReadyModal) {
-  btnCloseShareModal.addEventListener('click', () => {
-    shareReadyModal.style.display = 'none';
-    pendingShareFileObj = null;
-  });
-}
-
-if (btnConfirmShareNow && shareReadyModal) {
-  btnConfirmShareNow.addEventListener('click', async () => {
-    const fileObj = pendingShareFileObj;
-    shareReadyModal.style.display = 'none';
-    pendingShareFileObj = null;
-    if (fileObj && navigator.share) {
-      try {
-        await navigator.share({
-          files: [fileObj],
-          title: fileObj.name
-        });
-      } catch (e) {}
-    }
-  });
-}
-
-// -------------------------------------------------------------
-// Instalación de PWA (Para aparecer en "Compartir" desde WhatsApp)
-// -------------------------------------------------------------
-let deferredInstallPrompt = null;
-const btnInstallPwa = document.getElementById('btnInstallPwa');
-
-window.addEventListener('beforeinstallprompt', (e) => {
-  e.preventDefault();
-  deferredInstallPrompt = e;
-  if (btnInstallPwa && isMobile) {
-    btnInstallPwa.style.display = 'inline-flex';
-  }
-});
-
-if (btnInstallPwa) {
-  btnInstallPwa.addEventListener('click', async () => {
-    if (!deferredInstallPrompt) return;
-    deferredInstallPrompt.prompt();
-    const { outcome } = await deferredInstallPrompt.userChoice;
-    if (outcome === 'accepted') {
-      btnInstallPwa.style.display = 'none';
-      showToast('¡App instalada! Ya aparecerá en el menú Compartir de tu celular');
-    }
-    deferredInstallPrompt = null;
-  });
-}
-
-// -------------------------------------------------------------
-// Detectar cuando se abrió la app tras compartir desde WhatsApp u otra app
-// -------------------------------------------------------------
-(function checkSharedFromExternalApp() {
-  const params = new URLSearchParams(window.location.search);
-  const sharedType = params.get('shared');
-  if (sharedType) {
-    if (sharedType === 'files') {
-      switchMainTab('files');
-      setTimeout(() => {
-        playChime();
-        showToast('¡Archivo recibido desde la app externa y enviado a la Laptop!');
-      }, 400);
-    } else if (sharedType === 'text') {
-      switchMainTab('chat');
-      setTimeout(() => {
-        playChime();
-        showToast('¡Texto recibido y sincronizado con la Laptop!');
-      }, 400);
-    } else if (sharedType === 'error') {
-      setTimeout(() => showToast('Error al recibir el archivo compartido'), 400);
-    }
-    window.history.replaceState({}, document.title, window.location.pathname);
-  }
-})();
-
-
