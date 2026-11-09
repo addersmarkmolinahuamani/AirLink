@@ -1,0 +1,10 @@
+node_modules/
+Archivos_Recibidos/
+credentials.json
+tokens.json
+config.json
+mensajes.json
+cloudflared.exe
+*.log
+.DS_Store
+Thumbs.db

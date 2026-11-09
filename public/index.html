@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>AirLink Express - Transferencia Rápida Celular ↔ Laptop</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" type="image/svg+xml" href="/icon.svg">
+  <meta name="theme-color" content="#090d16">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="AirLink">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Fondo con efecto de luz y gradiente -->
+  <div class="ambient-glow glow-1"></div>
+  <div class="ambient-glow glow-2"></div>
+
+  <div class="app-container">
+    <!-- Encabezado Principal -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+            <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+            <line x1="12" y1="22.08" x2="12" y2="12"></line>
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-title">AirLink <span>Express</span></h1>
+          <p class="brand-subtitle">Transferencia directa Celular ↔ Laptop</p>
+        </div>
+      </div>
+
+      <div class="header-badges">
+        <div id="deviceBadge" class="badge device-badge">
+          <span class="device-icon">💻</span>
+          <span id="deviceText">Laptop</span>
+        </div>
+        <div class="badge connection-badge">
+          <span class="status-pulse"></span>
+          <span id="connectionStatus">Conectado en vivo</span>
+        </div>
+        <a id="btnDriveBadge" href="/auth/google" target="_blank" class="badge btn-drive-badge" title="Vincular con tu Google Drive para transferencias sin caídas">
+          <span class="drive-icon">☁️</span>
+          <span id="driveStatusText">Conectar Drive</span>
+        </a>
+        <button id="btnInstallPwa" class="badge btn-install-badge" style="display: none;" title="Instalar AirLink en tu celular para compartir directo desde WhatsApp">
+          <span>📲 Instalar App</span>
+        </button>
+        <button id="btnPairOptions" class="badge btn-reconnect-badge" title="Estado de vinculación o vincular nuevo dispositivo">
+          <span>🔗 Vinculado</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Disposición Principal -->
+    <main class="main-grid">
+      <!-- Columna / Tarjeta de Conexión y Código QR (Visible en Laptop) -->
+      <section class="card qr-section" id="qrCard">
+        <div class="card-header">
+          <div class="card-title-wrap">
+            <span class="step-num">1</span>
+            <h2>Vincular con tu Celular</h2>
+          </div>
+          <span class="badge-pill highlight">Estilo WhatsApp Web</span>
+        </div>
+        <p class="section-desc">Escanea este código QR por <strong>única vez</strong> con la cámara de tu celular. Tu cuenta quedará abierta de forma permanente sin claves temporales.</p>
+
+        <!-- Selector de Modo de Red -->
+        <div class="network-tabs">
+          <button class="tab-btn active" id="tabInternet" onclick="switchNetworkMode('internet')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+            Por Internet (Datos / En cualquier lugar)
+          </button>
+          <button class="tab-btn" id="tabLocal" onclick="switchNetworkMode('local')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"></path><path d="M1.42 9a16 16 0 0 1 21.16 0"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><line x1="12" y1="20" x2="12.01" y2="20"></line></svg>
+            Wi-Fi Local
+          </button>
+        </div>
+
+        <!-- Contenedor del Código QR -->
+        <div class="qr-box-wrapper">
+          <div class="qr-box" id="qrContainer">
+            <div class="qr-loading" id="qrLoading">
+              <div class="spinner"></div>
+              <span>Generando enlace seguro...</span>
+            </div>
+            <img id="qrImage" src="" alt="Código QR de Vinculación" style="display: none;">
+          </div>
+        </div>
+
+        <!-- Enlace Directo Copiable -->
+        <div class="url-copy-box">
+          <div class="url-input-wrap">
+            <input type="text" id="activeUrlInput" readonly value="Cargando enlace de vinculación...">
+            <button class="btn-copy" id="btnCopyUrl" title="Copiar enlace de vinculación">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              <span>Copiar</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Tarjeta Informativa de Vinculación Permanente (Sin PIN) -->
+        <div class="permanent-pair-card" id="permanentPairCard">
+          <div class="permanent-pair-header">
+            <span class="permanent-pair-icon">⚡</span>
+            <div>
+              <h3 class="permanent-pair-title">Sesión Permanente Activa</h3>
+              <p class="permanent-pair-subtitle">Al escanear el QR, tu celular nunca más pedirá contraseñas.</p>
+            </div>
+          </div>
+          <div class="permanent-pair-badge">
+            <span class="status-pulse"></span>
+            <span id="pairStatusBadgeText">Esperando escaneo inicial</span>
+          </div>
+        </div>
+
+        <div class="laptop-actions" id="laptopActionButtons">
+          <button class="btn btn-secondary full-width" id="btnOpenFolder">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+            <span>Abrir carpeta en mi Laptop</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Columna Derecha / Área de Trabajo Principal -->
+      <div class="workspace-column">
+        <!-- Selector de Pestañas: Archivos vs Texto & Portapapeles -->
+        <nav class="workspace-tabs" role="tablist">
+          <button class="workspace-tab-btn active" id="tabNavFiles" onclick="switchMainTab('files')" role="tab" aria-selected="true">
+            <span class="tab-icon">📁</span>
+            <span class="tab-label">Archivos</span>
+            <span class="tab-counter" id="tabFilesBadge">0</span>
+          </button>
+          <button class="workspace-tab-btn" id="tabNavChat" onclick="switchMainTab('chat')" role="tab" aria-selected="false">
+            <span class="tab-icon">💬</span>
+            <span class="tab-label">Texto y Portapapeles</span>
+            <span class="tab-counter" id="tabChatBadge">0</span>
+            <span class="tab-unread-dot" id="chatUnreadDot" style="display: none;"></span>
+          </button>
+        </nav>
+
+        <!-- Pestaña 1: Envío y Descarga de Archivos -->
+        <section class="card upload-section" id="filesTabSection">
+          <div class="card-header">
+            <div class="card-title-wrap">
+              <span class="step-num">2</span>
+              <h2 id="uploadTitle">Enviar Archivos</h2>
+            </div>
+            <span class="badge-pill highlight" id="uploadTargetBadge">Hacia la Laptop 💻</span>
+          </div>
+
+          <!-- Banner de Google Drive -->
+          <div class="drive-banner" id="driveBanner">
+            <div class="drive-banner-left">
+              <span class="drive-banner-icon">☁️</span>
+              <div class="drive-banner-text">
+                <h4 id="driveBannerTitle">Respaldo en Google Drive</h4>
+                <p id="driveBannerDesc">Conecta tu cuenta para transferir sin límites ni caídas entre WhatsApp y Laptop.</p>
+              </div>
+            </div>
+            <a href="/auth/google" target="_blank" class="btn-drive-connect" id="btnDriveAction">Conectar Drive</a>
+          </div>
+
+          <!-- Zona de Arrastrar y Soltar / Botón de Carga -->
+          <div class="drop-zone" id="dropZone">
+            <input type="file" id="fileInput" multiple style="display: none;">
+            <input type="file" id="cameraInput" accept="image/*" capture="environment" style="display: none;">
+            
+            <div class="drop-content">
+              <div class="upload-icon-circle">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+              </div>
+              <h3>Toca para seleccionar archivos</h3>
+              <p class="drop-subtext" id="dropSubtext">Fotos, videos, documentos sin compresión ni límite</p>
+              
+              <div class="upload-buttons-row">
+                <button class="btn btn-primary" id="btnSelectFiles">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
+                  <span>Elegir Archivos</span>
+                </button>
+                <button class="btn btn-secondary laptop-only-btn" id="btnPasteCapture" type="button" title="Pegar captura de pantalla del portapapeles (Ctrl+V)">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect><circle cx="12" cy="13" r="2.5"></circle></svg>
+                  <span>Pegar Captura</span>
+                  <kbd class="kbd-badge">Ctrl+V</kbd>
+                </button>
+                <button class="btn btn-outline mobile-only-btn" id="btnCamera">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                  <span>Cámara</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Barras de Progreso Activas -->
+          <div class="progress-container" id="progressContainer" style="display: none;">
+            <div class="progress-header">
+              <span class="progress-title" id="progressTitle">Subiendo archivos...</span>
+              <span class="progress-percent" id="progressPercent">0%</span>
+            </div>
+            <div class="progress-bar-bg">
+              <div class="progress-bar-fill" id="progressBarFill"></div>
+            </div>
+            <div class="progress-info" id="progressInfo">0 MB transferidos</div>
+          </div>
+
+          <!-- Lista de Archivos Transferidos -->
+          <div class="files-header">
+            <h3>Archivos Disponibles (<span id="filesCount">0</span>)</h3>
+            <button class="btn-refresh" id="btnRefresh" title="Actualizar lista">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+            </button>
+          </div>
+
+          <div class="files-list" id="filesList">
+            <div class="empty-state" id="emptyState">
+              <div class="empty-icon">📁</div>
+              <p>Aún no hay archivos transferidos.</p>
+              <span>Selecciona un archivo arriba para probar la transferencia.</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Pestaña 2: Caja de Chat / Portapapeles Compartido -->
+        <section class="card chat-section" id="chatTabSection" style="display: none;">
+          <div class="card-header">
+            <div class="card-title-wrap">
+              <span class="step-num chat-step-num">💬</span>
+              <div>
+                <h2>Texto y Portapapeles</h2>
+                <p class="section-desc">Escribe o pega texto para copiarlo al instante en tu <span id="chatTargetDeviceText">Laptop</span>.</p>
+              </div>
+            </div>
+            <div class="chat-header-actions">
+              <button class="btn-clear-chat" id="btnClearChat" title="Vaciar historial de textos">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                <span>Vaciar</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Caja de Entrada para Escribir y Pegar -->
+          <div class="chat-input-box">
+            <textarea id="chatInput" placeholder="Escribe un mensaje, texto, enlace o código aquí...&#10;(Laptop: Enter para enviar, Shift+Enter para nueva línea)" rows="3"></textarea>
+            
+            <div class="chat-input-footer">
+              <div class="chat-footer-left">
+                <button class="btn btn-outline btn-sm" id="btnPasteText" type="button" title="Pegar del portapapeles">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>
+                  <span>Pegar</span>
+                </button>
+                <span class="chat-char-counter" id="chatCharCounter">0 caracteres</span>
+              </div>
+              
+              <div class="chat-footer-right">
+                <button class="btn btn-primary" id="btnSendText" type="button">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                  <span>Enviar Texto</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Historial de Textos / Mensajes -->
+          <div class="chat-messages-header">
+            <h3>Textos Compartidos (<span id="messagesCount">0</span>)</h3>
+            <span class="auto-sync-hint">⚡ Sincronizado en vivo</span>
+          </div>
+
+          <div class="chat-messages-list" id="chatMessagesList">
+            <div class="empty-state" id="emptyChatState">
+              <div class="empty-icon">💬</div>
+              <p>Aún no hay textos compartidos.</p>
+              <span>Escribe o pega texto arriba para verlo y copiarlo en el otro dispositivo.</span>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <!-- Modal para Vincular / Escanear nuevo QR o Desvincular -->
+    <div class="modal-overlay" id="reconnectModal" style="display: none;">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3 id="modalDeviceTitle">Vincular Dispositivo</h3>
+          <button class="btn-close-modal" id="btnCloseModal" title="Cerrar">&times;</button>
+        </div>
+        <p class="modal-desc" id="modalDeviceDesc">Tu celular está vinculado permanentemente a tu Laptop (estilo WhatsApp Web). Si deseas cambiar de computadora o re-escanear, utiliza las opciones abajo.</p>
+
+        <!-- Visor de Cámara para escanear QR -->
+        <div class="scanner-container" id="scannerContainer" style="display: none;">
+          <div class="scanner-video-wrap">
+            <video id="scannerVideo" playsinline></video>
+            <div class="scanner-laser"></div>
+          </div>
+          <button class="btn btn-secondary full-width" id="btnStopScanner" style="margin-top: 10px;">Detener Cámara</button>
+        </div>
+
+        <div class="modal-actions" id="modalActions">
+          <button class="btn btn-primary full-width" id="btnStartScan">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+            <span>Escanear Código QR con la Cámara</span>
+          </button>
+
+          <button class="btn btn-outline full-width" id="btnUnpairDevice" style="color: #f87171; border-color: rgba(248, 113, 113, 0.3);">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>
+            <span>Desvincular este Celular</span>
+          </button>
+
+          <div class="modal-divider"><span>O ingresa el enlace directamente</span></div>
+
+          <div class="manual-url-wrap">
+            <input type="text" id="manualUrlInput" placeholder="Ej: 192.168.1.15:4321 o enlace">
+            <button class="btn btn-secondary" id="btnConnectManual">Conectar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal de confirmación rápida para compartir archivos pesados -->
+    <div class="modal-overlay" id="shareReadyModal" style="display: none;">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Archivo listo para compartir</h3>
+          <button class="btn-close-modal" id="btnCloseShareModal" title="Cerrar">&times;</button>
+        </div>
+        <p class="modal-desc" id="shareReadyFileName">El archivo ya está preparado. Toca el botón de abajo para elegir el chat de WhatsApp.</p>
+        <button class="btn btn-primary full-width" id="btnConfirmShareNow">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
+          <span>Abrir WhatsApp / Compartir</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Notificación Flotante (Toast) -->
+    <div class="toast" id="toast">
+      <span class="toast-icon">✨</span>
+      <span class="toast-message" id="toastMessage">Operación exitosa</span>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
