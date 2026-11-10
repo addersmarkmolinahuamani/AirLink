@@ -4,9 +4,14 @@
 const CLIENT_ID = '53478639551-2ndvvqghcmmnld49m3jktf8j2ji1m1pg.apps.googleusercontent.com';
 const SCOPES = 'https://www.googleapis.com/auth/drive';
 const SAFE_DRIVE_ID_RE = /^[a-zA-Z0-9_-]{10,128}$/;
+const SAFE_SCRIPT_URL_RE = /^https:\/\/script\.google\.com\/macros\/s\/[a-zA-Z0-9_-]{20,180}\/exec$/;
 
 function isValidDriveId(id) {
   return typeof id === 'string' && SAFE_DRIVE_ID_RE.test(id);
+}
+
+function isValidScriptUrl(url) {
+  return typeof url === 'string' && SAFE_SCRIPT_URL_RE.test(url.trim());
 }
 
 function isSafeHttpUrl(rawUrl, httpsOnly = false) {
@@ -52,11 +57,19 @@ function clearStoredSession(clearFolder = false) {
 }
 
 let tokenClient = null;
+let tokenRefreshPromise = null;
 let accessToken = localStorage.getItem('airlink_drive_token') || null;
 let tokenExpiry = parseInt(localStorage.getItem('airlink_token_expiry') || '0', 10);
+const storedScriptUrl = localStorage.getItem('airlink_script_url');
+let instantScriptUrl = isValidScriptUrl(storedScriptUrl) ? storedScriptUrl.trim() : null;
+let instantAccessKey = localStorage.getItem('airlink_access_key') || null;
 const storedFolderId = localStorage.getItem('airlink_folder_id');
 let airlinkFolderId = isValidDriveId(storedFolderId) ? storedFolderId : null;
 let activeMainTab = 'files';
+
+function hasInstantConfig() {
+  return isValidScriptUrl(instantScriptUrl) && typeof instantAccessKey === 'string' && instantAccessKey.length >= 8;
+}
 
 let filesData = [];
 let messagesData = [];
@@ -72,9 +85,24 @@ const deviceText = document.getElementById('deviceText');
 const btnDriveAuth = document.getElementById('btnDriveAuth');
 const driveAuthText = document.getElementById('driveAuthText');
 const driveBanner = document.getElementById('driveBanner');
+const driveBannerIcon = document.getElementById('driveBannerIcon');
 const driveBannerTitle = document.getElementById('driveBannerTitle');
 const driveBannerDesc = document.getElementById('driveBannerDesc');
 const btnDriveAction = document.getElementById('btnDriveAction');
+const btnGoogleFallback = document.getElementById('btnGoogleFallback');
+const btnShareDevice = document.getElementById('btnShareDevice');
+
+const instantSetupModal = document.getElementById('instantSetupModal');
+const btnCloseInstantModal = document.getElementById('btnCloseInstantModal');
+const scriptUrlInput = document.getElementById('scriptUrlInput');
+const accessKeyInput = document.getElementById('accessKeyInput');
+const instantSetupError = document.getElementById('instantSetupError');
+const btnSaveInstantSetup = document.getElementById('btnSaveInstantSetup');
+
+const shareDeviceModal = document.getElementById('shareDeviceModal');
+const btnCloseShareModal = document.getElementById('btnCloseShareModal');
+const shareDeviceLinkInput = document.getElementById('shareDeviceLinkInput');
+const btnCopyShareLink = document.getElementById('btnCopyShareLink');
 
 const tabNavFiles = document.getElementById('tabNavFiles');
 const tabNavChat = document.getElementById('tabNavChat');
@@ -160,8 +188,91 @@ function playChime() {
 }
 
 // -------------------------------------------------------------
-// Google Identity Services (GIS) & Autenticación
+// Modo Permanente Instantáneo (Apps Script) + GIS Respaldo
 // -------------------------------------------------------------
+function processHashPairing() {
+  try {
+    const hash = window.location.hash || '';
+    if (!hash.startsWith('#link=')) return false;
+
+    const encoded = hash.slice(6);
+    // Borrar de inmediato el hash de la barra/historial
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+
+    const jsonStr = decodeURIComponent(escape(atob(encoded.replace(/-/g, '+').replace(/_/g, '/'))));
+    const payload = JSON.parse(jsonStr);
+    if (payload && isValidScriptUrl(payload.u) && typeof payload.k === 'string' && payload.k.length >= 8) {
+      instantScriptUrl = payload.u.trim();
+      instantAccessKey = payload.k;
+      localStorage.setItem('airlink_script_url', instantScriptUrl);
+      localStorage.setItem('airlink_access_key', instantAccessKey);
+      showToast('⚡ Dispositivo vinculado permanentemente');
+      return true;
+    }
+  } catch (e) {
+    console.error('Error procesando enlace de vinculación:', e);
+  }
+  return false;
+}
+
+async function fetchInstantToken(customUrl = null, customKey = null) {
+  const targetUrl = (customUrl || instantScriptUrl || '').trim();
+  const targetKey = customKey || instantAccessKey || '';
+  if (!isValidScriptUrl(targetUrl) || targetKey.length < 8) {
+    throw new Error('Configuración instantánea inválida');
+  }
+
+  if (!customUrl && tokenRefreshPromise) {
+    return tokenRefreshPromise;
+  }
+
+  const execRequest = async () => {
+    const res = await fetch(targetUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ key: targetKey })
+    });
+    if (!res.ok) {
+      throw new Error(`Error de conexión (${res.status})`);
+    }
+    const data = await res.json();
+    if (!data || !data.ok || !data.access_token) {
+      throw new Error((data && data.error) || 'No se pudo obtener autorización de Drive');
+    }
+    accessToken = data.access_token;
+    const expiresIn = parseInt(data.expires_in || '2400', 10);
+    tokenExpiry = Date.now() + expiresIn * 1000;
+    localStorage.setItem('airlink_drive_token', accessToken);
+    localStorage.setItem('airlink_token_expiry', String(tokenExpiry));
+    return accessToken;
+  };
+
+  if (customUrl) {
+    return execRequest();
+  }
+
+  tokenRefreshPromise = execRequest().finally(() => {
+    tokenRefreshPromise = null;
+  });
+  return tokenRefreshPromise;
+}
+
+async function ensureValidToken() {
+  if (isTokenValid()) return true;
+  if (hasInstantConfig()) {
+    try {
+      await fetchInstantToken();
+      updateAuthUI(true);
+      return true;
+    } catch (err) {
+      console.error('Error renovando token instantáneo:', err);
+      updateAuthUI(false);
+      return false;
+    }
+  }
+  return false;
+}
+
 function initGoogleAuth() {
   if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) {
     setTimeout(initGoogleAuth, 300);
@@ -189,19 +300,8 @@ function initGoogleAuth() {
         }
       }
     });
-
-    if (isTokenValid()) {
-      updateAuthUI(true);
-      initializeDriveFolder().then(() => {
-        loadAllData();
-      });
-    } else {
-      clearStoredSession(false);
-      updateAuthUI(false);
-    }
   } catch (err) {
     console.error('Error inicializando Google Auth:', err);
-    updateAuthUI(false);
   }
 }
 
@@ -214,15 +314,50 @@ function requestDriveAccess() {
     initGoogleAuth();
   }
   if (tokenClient) {
-    tokenClient.requestAccessToken({ prompt: 'consent' });
+    tokenClient.requestAccessToken({ prompt: '' });
   } else {
     showToast('Cargando servicio de Google... intenta en unos segundos');
   }
 }
 
-function disconnectDrive() {
+function openInstantSetupModal() {
+  if (instantSetupError) {
+    instantSetupError.style.display = 'none';
+    instantSetupError.textContent = '';
+  }
+  if (scriptUrlInput && instantScriptUrl) scriptUrlInput.value = instantScriptUrl;
+  if (accessKeyInput) accessKeyInput.value = '';
+  if (instantSetupModal) instantSetupModal.style.display = 'flex';
+}
+
+function closeInstantSetupModal() {
+  if (instantSetupModal) instantSetupModal.style.display = 'none';
+}
+
+function openShareDeviceModal() {
+  if (!hasInstantConfig()) return;
+  const payload = JSON.stringify({ u: instantScriptUrl, k: instantAccessKey });
+  const base64 = btoa(unescape(encodeURIComponent(payload)))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  const magicLink = `${window.location.origin}${window.location.pathname}#link=${base64}`;
+  if (shareDeviceLinkInput) shareDeviceLinkInput.value = magicLink;
+  if (shareDeviceModal) shareDeviceModal.style.display = 'flex';
+}
+
+function disconnectDrive(unlinkInstant = false) {
   const tokenToRevoke = accessToken;
+  const wasInstant = hasInstantConfig();
   clearStoredSession(true);
+
+  if (unlinkInstant || wasInstant) {
+    instantScriptUrl = null;
+    instantAccessKey = null;
+    localStorage.removeItem('airlink_script_url');
+    localStorage.removeItem('airlink_access_key');
+  }
+
   filesData = [];
   messagesData = [];
   renderFiles([]);
@@ -233,60 +368,156 @@ function disconnectDrive() {
     btnOpenDriveFolder.href = 'https://drive.google.com';
   }
 
-  if (tokenToRevoke && typeof google !== 'undefined' && google.accounts && google.accounts.oauth2) {
+  if (tokenToRevoke && !wasInstant && typeof google !== 'undefined' && google.accounts && google.accounts.oauth2) {
     try {
       google.accounts.oauth2.revoke(tokenToRevoke, () => {});
     } catch (e) {}
   }
-  showToast('🔒 Sesión de Google Drive cerrada y revocada');
+  showToast('🔒 Dispositivo desvinculado de Google Drive');
 }
 
 function updateAuthUI(connected) {
+  const instantActive = hasInstantConfig();
+
   if (connected) {
     if (btnDriveAuth) {
       btnDriveAuth.classList.add('connected');
-      btnDriveAuth.title = 'Clic para cerrar sesión y revocar acceso en este dispositivo';
+      btnDriveAuth.title = 'Clic para desvincular este dispositivo';
     }
-    if (driveAuthText) driveAuthText.textContent = 'Drive Conectado ✓';
+    if (driveAuthText) driveAuthText.textContent = instantActive ? '⚡ Drive Activo ✓' : 'Drive Conectado ✓';
     if (driveBanner) driveBanner.classList.add('connected');
-    if (driveBannerTitle) driveBannerTitle.textContent = '☁️ Google Drive Activo';
-    if (driveBannerDesc) driveBannerDesc.textContent = 'Tus archivos se guardan directamente en tu carpeta "AirLink Express" de Google Drive.';
+    if (driveBannerIcon) driveBannerIcon.textContent = instantActive ? '⚡' : '☁️';
+    if (driveBannerTitle) {
+      driveBannerTitle.textContent = instantActive
+        ? '⚡ Conexión Instantánea Activa'
+        : '☁️ Google Drive Activo (1h)';
+    }
+    if (driveBannerDesc) {
+      driveBannerDesc.textContent = instantActive
+        ? 'Entras directo cada vez que abres la web sin volver a iniciar sesión. Carpeta: "AirLink Express".'
+        : 'Tus archivos se guardan directamente en tu carpeta "AirLink Express" de Google Drive.';
+    }
     if (btnDriveAction) {
       btnDriveAction.classList.add('connected');
       btnDriveAction.textContent = '✓ Conectado';
     }
+    if (btnGoogleFallback) btnGoogleFallback.style.display = 'none';
+    if (btnShareDevice) btnShareDevice.style.display = instantActive ? 'inline-flex' : 'none';
   } else {
     if (btnDriveAuth) {
       btnDriveAuth.classList.remove('connected');
-      btnDriveAuth.title = 'Conectar con Google Drive';
+      btnDriveAuth.title = 'Configurar o conectar Google Drive';
     }
-    if (driveAuthText) driveAuthText.textContent = 'Conectar Drive';
+    if (driveAuthText) driveAuthText.textContent = 'Vincular Drive';
     if (driveBanner) driveBanner.classList.remove('connected');
-    if (driveBannerTitle) driveBannerTitle.textContent = 'Conectar con Google Drive';
-    if (driveBannerDesc) driveBannerDesc.textContent = 'Inicia sesión una sola vez para sincronizar tus archivos, capturas y textos entre tu celular y tu laptop sin límites ni túneles.';
+    if (driveBannerIcon) driveBannerIcon.textContent = '⚡';
+    if (driveBannerTitle) driveBannerTitle.textContent = 'Acceso Instantáneo a Google Drive';
+    if (driveBannerDesc) {
+      driveBannerDesc.textContent = 'Vincula este dispositivo una sola vez con tu Apps Script privado para entrar directo sin iniciar sesión cada hora.';
+    }
     if (btnDriveAction) {
       btnDriveAction.classList.remove('connected');
-      btnDriveAction.textContent = 'Conectar con Google';
+      btnDriveAction.textContent = '⚡ Configurar Acceso Rápido';
     }
+    if (btnGoogleFallback) btnGoogleFallback.style.display = 'inline-flex';
+    if (btnShareDevice) btnShareDevice.style.display = 'none';
   }
 }
 
 if (btnDriveAuth) {
   btnDriveAuth.addEventListener('click', () => {
-    if (isTokenValid()) {
-      if (confirm('¿Deseas desconectar y revocar tu sesión de Google Drive en este dispositivo?')) {
-        disconnectDrive();
+    if (isTokenValid() || hasInstantConfig()) {
+      if (confirm('¿Deseas desvincular este dispositivo y cerrar la sesión de Google Drive?')) {
+        disconnectDrive(true);
       }
     } else {
-      requestDriveAccess();
+      openInstantSetupModal();
     }
   });
 }
 
 if (btnDriveAction) {
   btnDriveAction.addEventListener('click', () => {
-    if (!isTokenValid()) {
-      requestDriveAccess();
+    if (!isTokenValid() && !hasInstantConfig()) {
+      openInstantSetupModal();
+    }
+  });
+}
+
+if (btnGoogleFallback) {
+  btnGoogleFallback.addEventListener('click', requestDriveAccess);
+}
+
+if (btnShareDevice) {
+  btnShareDevice.addEventListener('click', openShareDeviceModal);
+}
+
+if (btnCloseInstantModal) {
+  btnCloseInstantModal.addEventListener('click', closeInstantSetupModal);
+}
+
+if (btnCloseShareModal) {
+  btnCloseShareModal.addEventListener('click', () => {
+    if (shareDeviceModal) shareDeviceModal.style.display = 'none';
+  });
+}
+
+if (btnCopyShareLink && shareDeviceLinkInput) {
+  btnCopyShareLink.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(shareDeviceLinkInput.value);
+      showToast('📋 Enlace privado copiado. Ábrelo una vez en tu celular.');
+    } catch (e) {
+      shareDeviceLinkInput.select();
+      showToast('Copia el enlace manualmente');
+    }
+  });
+}
+
+if (btnSaveInstantSetup) {
+  btnSaveInstantSetup.addEventListener('click', async () => {
+    const urlVal = (scriptUrlInput?.value || '').trim();
+    const keyVal = accessKeyInput?.value || '';
+
+    const showSetupError = (msg) => {
+      if (instantSetupError) {
+        instantSetupError.textContent = msg;
+        instantSetupError.style.display = 'block';
+      }
+    };
+
+    if (!isValidScriptUrl(urlVal)) {
+      showSetupError('La URL debe empezar por https://script.google.com/macros/s/... y terminar en /exec');
+      return;
+    }
+    if (keyVal.length < 8) {
+      showSetupError('La clave secreta debe tener al menos 8 caracteres.');
+      return;
+    }
+
+    if (instantSetupError) instantSetupError.style.display = 'none';
+    btnSaveInstantSetup.disabled = true;
+    const origText = btnSaveInstantSetup.textContent;
+    btnSaveInstantSetup.textContent = 'Verificando conexión...';
+
+    try {
+      await fetchInstantToken(urlVal, keyVal);
+      instantScriptUrl = urlVal;
+      instantAccessKey = keyVal;
+      localStorage.setItem('airlink_script_url', instantScriptUrl);
+      localStorage.setItem('airlink_access_key', instantAccessKey);
+
+      closeInstantSetupModal();
+      updateAuthUI(true);
+      playChime();
+      showToast('⚡ ¡Acceso permanente activado!');
+      await initializeDriveFolder();
+      loadAllData();
+    } catch (err) {
+      showSetupError(err.message || 'No se pudo conectar con Apps Script. Revisa la URL, la clave y que esté desplegado como "Cualquier usuario".');
+    } finally {
+      btnSaveInstantSetup.disabled = false;
+      btnSaveInstantSetup.textContent = origText;
     }
   });
 }
@@ -295,21 +526,35 @@ if (btnDriveAction) {
 // Operaciones con Google Drive API v3
 // -------------------------------------------------------------
 async function fetchWithAuth(url, options = {}) {
-  if (!isTokenValid()) {
+  const ready = await ensureValidToken();
+  if (!ready) {
     clearStoredSession(false);
-    showToast('Sesión de Google Drive expirada. Vuelve a conectar.');
     updateAuthUI(false);
+    showToast('Conecta tu acceso rápido o Google Drive primero.');
     throw new Error('Token expirado');
   }
-  const headers = {
-    ...options.headers,
-    Authorization: `Bearer ${accessToken}`
-  };
-  const res = await fetch(url, { ...options, headers });
+
+  const send = () => fetch(url, {
+    ...options,
+    headers: {
+      ...options.headers,
+      Authorization: `Bearer ${accessToken}`
+    }
+  });
+
+  let res = await send();
+  if (res.status === 401 && hasInstantConfig()) {
+    clearStoredSession(false);
+    try {
+      await fetchInstantToken();
+      res = await send();
+    } catch (e) {}
+  }
+
   if (res.status === 401) {
     clearStoredSession(false);
     updateAuthUI(false);
-    showToast('Sesión expirada. Toca "Conectar Drive" para renovar.');
+    showToast('Sesión expirada. Renueva tu conexión.');
     throw new Error('401 Unauthorized');
   }
   return res;
@@ -663,9 +908,10 @@ async function deleteDriveFile(fileId) {
 // Subida de Archivos a Google Drive
 // -------------------------------------------------------------
 async function uploadFiles(files) {
-  if (!isTokenValid()) {
-    showToast('Inicia sesión en Google Drive primero');
-    requestDriveAccess();
+  const ready = await ensureValidToken();
+  if (!ready) {
+    showToast('Configura tu acceso rápido o conecta Google primero');
+    if (!hasInstantConfig()) openInstantSetupModal();
     return;
   }
   if (!isValidDriveId(airlinkFolderId)) await initializeDriveFolder();
@@ -1075,9 +1321,10 @@ async function deleteMessage(id) {
 }
 
 async function sendMessage() {
-  if (!isTokenValid()) {
-    showToast('Inicia sesión en Google Drive primero');
-    requestDriveAccess();
+  const ready = await ensureValidToken();
+  if (!ready) {
+    showToast('Configura tu acceso rápido o conecta Google primero');
+    if (!hasInstantConfig()) openInstantSetupModal();
     return;
   }
   const text = (chatInput.value || '').trim();
@@ -1190,16 +1437,35 @@ if (tabNavFiles) tabNavFiles.addEventListener('click', () => switchMainTab('file
 if (tabNavChat) tabNavChat.addEventListener('click', () => switchMainTab('chat'));
 
 // Cargar datos a demanda (al iniciar sesión, al refrescar, o tras enviar/recibir)
-function loadAllData() {
-  if (isTokenValid()) {
+async function loadAllData() {
+  if (await ensureValidToken()) {
     loadDriveFiles();
     loadDriveMessages();
   }
 }
 
 // Iniciar aplicación
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
+  processHashPairing();
   initGoogleAuth();
+
+  if (hasInstantConfig()) {
+    if (driveBannerTitle) driveBannerTitle.textContent = '⚡ Conectando al instante...';
+    if (await ensureValidToken()) {
+      updateAuthUI(true);
+      await initializeDriveFolder();
+      loadAllData();
+    } else {
+      updateAuthUI(false);
+    }
+  } else if (isTokenValid()) {
+    updateAuthUI(true);
+    await initializeDriveFolder();
+    loadAllData();
+  } else {
+    clearStoredSession(false);
+    updateAuthUI(false);
+  }
 });
 
 // PWA Service Worker
