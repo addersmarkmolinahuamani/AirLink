@@ -141,7 +141,6 @@ function initGoogleAuth() {
           
           await initializeDriveFolder();
           loadAllData();
-          startSyncPolling();
         }
       }
     });
@@ -150,7 +149,6 @@ function initGoogleAuth() {
       updateAuthUI(true);
       initializeDriveFolder().then(() => {
         loadAllData();
-        startSyncPolling();
       });
     } else {
       updateAuthUI(false);
@@ -313,14 +311,17 @@ async function loadDriveFiles() {
       };
     });
 
-    // Detectar si llegaron archivos nuevos para avisar con sonido
-    if (filesData.length > 0 && newFiles.length > filesData.length) {
-      playChime();
-      showToast('☁️ ¡Nuevo archivo disponible en AirLink Express!');
+    // Solo actualizar la vista si los archivos realmente cambiaron
+    const currentIds = filesData.map(f => f.id).join(',');
+    const newIds = newFiles.map(f => f.id).join(',');
+    if (currentIds !== newIds || filesData.length === 0) {
+      if (filesData.length > 0 && newFiles.length > filesData.length) {
+        playChime();
+        showToast('☁️ ¡Nuevo archivo disponible en AirLink Express!');
+      }
+      filesData = newFiles;
+      renderFiles(filesData);
     }
-
-    filesData = newFiles;
-    renderFiles(filesData);
   } catch (e) {
     console.error('Error cargando archivos de Drive:', e);
   }
@@ -692,13 +693,17 @@ async function loadDriveMessages() {
       if (res.ok) {
         const msgs = await res.json();
         if (Array.isArray(msgs)) {
-          if (messagesData.length > 0 && msgs.length > messagesData.length) {
-            playChime();
-            showToast('💬 Nuevo texto recibido');
-            if (activeMainTab !== 'chat' && chatUnreadDot) chatUnreadDot.style.display = 'block';
+          const currentMsgIds = messagesData.map(m => m.id).join(',');
+          const newMsgIds = msgs.map(m => m.id).join(',');
+          if (currentMsgIds !== newMsgIds || messagesData.length === 0) {
+            if (messagesData.length > 0 && msgs.length > messagesData.length) {
+              playChime();
+              showToast('💬 Nuevo texto recibido');
+              if (activeMainTab !== 'chat' && chatUnreadDot) chatUnreadDot.style.display = 'block';
+            }
+            messagesData = msgs;
+            renderMessages(messagesData);
           }
-          messagesData = msgs;
-          renderMessages(messagesData);
         }
       }
     }
@@ -930,32 +935,13 @@ function switchMainTab(tab) {
 }
 window.switchMainTab = switchMainTab;
 
-// -------------------------------------------------------------
-// Sincronización Automática en Segundo Plano (Polling)
-// -------------------------------------------------------------
+// Cargar datos a demanda (al iniciar sesión, al refrescar, o tras enviar/recibir)
 function loadAllData() {
   if (isTokenValid()) {
     loadDriveFiles();
     loadDriveMessages();
   }
 }
-
-function startSyncPolling() {
-  if (pollTimer) clearInterval(pollTimer);
-  // Consultar Drive cada 6 segundos automáticamente
-  pollTimer = setInterval(() => {
-    if (isTokenValid()) {
-      loadDriveFiles();
-      loadDriveMessages();
-    }
-  }, 6000);
-}
-
-// Al enfocar la ventana o volver al navegador, sincronizar de inmediato
-window.addEventListener('focus', loadAllData);
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) loadAllData();
-});
 
 // Modal de configuración de Client ID
 const clientIdModal = document.getElementById('clientIdModal');
