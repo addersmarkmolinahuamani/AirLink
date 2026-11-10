@@ -1,7 +1,7 @@
 // AirLink Express - Nube Directa en Google Drive (Serverless)
 // Compatible con GitHub Pages, Celular y Laptop sin consumir recursos locales
 
-const DEFAULT_CLIENT_ID = '53478639551-f0vfjugegac0kvafr0n74rktgi1p6n5l.apps.googleusercontent.com';
+const DEFAULT_CLIENT_ID = '53478639551-2ndvvqghcmmnld49m3jktf8j2ji1m1pg.apps.googleusercontent.com';
 const SCOPES = 'https://www.googleapis.com/auth/drive';
 
 let tokenClient = null;
