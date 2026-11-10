@@ -1,10 +1,15 @@
 node_modules/
 Archivos_Recibidos/
 credentials.json
+client_secret*.json
 tokens.json
 config.json
 mensajes.json
 cloudflared.exe
+.env
+.env.*
+*.pem
+*.key
 *.log
 .DS_Store
 Thumbs.db

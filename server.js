@@ -1,5 +1,4 @@
 const express = require('express');
-const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -14,25 +13,57 @@ const app = express();
 const PORT = process.env.PORT || 4321;
 
 // Carpetas de almacenamiento
-const STORAGE_DIR = path.join(__dirname, 'Archivos_Recibidos');
+const STORAGE_DIR = path.resolve(__dirname, 'Archivos_Recibidos');
 if (!fs.existsSync(STORAGE_DIR)) {
   fs.mkdirSync(STORAGE_DIR, { recursive: true });
 }
 
-// Configuración de Multer para guardar archivos con su nombre original
+function escapeHtml(str) {
+  return String(str || '').replace(/[&<>"']/g, (m) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  }[m]));
+}
+
+function resolveSafeStoragePath(rawName) {
+  const safeName = path.basename(String(rawName || '')).replace(/[\x00-\x1f]/g, '').trim();
+  if (!safeName || safeName === '.' || safeName === '..') return null;
+  const resolved = path.resolve(STORAGE_DIR, safeName);
+  if (!resolved.startsWith(STORAGE_DIR + path.sep)) return null;
+  return { safeName, filePath: resolved };
+}
+
+function isLocalRequest(req) {
+  // Bloquear si viene a través de un túnel/proxy externo como Cloudflare
+  if (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for']) return false;
+  const ip = req.ip || req.socket?.remoteAddress || '';
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
+function requireLocalRequest(req, res, next) {
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({ error: 'Acción permitida solo desde la laptop local' });
+  }
+  next();
+}
+
+// Configuración de Multer para guardar archivos con su nombre original (sanitizado)
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, STORAGE_DIR);
   },
   filename: (req, file, cb) => {
-    // Decodificar el nombre de archivo en UTF-8 para soportar tildes, eñes y emojis
-    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
-    const ext = path.extname(originalName);
-    const baseName = path.basename(originalName, ext);
-    
-    let targetName = originalName;
+    // Decodificar el nombre de archivo en UTF-8 y evitar path traversal
+    const decoded = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    const safeBase = path.basename(decoded).replace(/[\x00-\x1f]/g, '').trim() || `archivo_${Date.now()}`;
+    const ext = path.extname(safeBase);
+    const baseName = path.basename(safeBase, ext);
+
+    let targetName = safeBase;
     let counter = 1;
-    // Si ya existe un archivo con el mismo nombre, añadir sufijo (1), (2), etc.
     while (fs.existsSync(path.join(STORAGE_DIR, targetName))) {
       targetName = `${baseName} (${counter})${ext}`;
       counter++;
@@ -47,8 +78,14 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 * 1024 }
 });
 
-app.use(cors());
-app.use(express.json());
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/files-data', express.static(STORAGE_DIR));
 
@@ -278,7 +315,7 @@ app.get('/api/pair-info', (req, res) => {
   });
 });
 
-app.post('/api/reset-pair', async (req, res) => {
+app.post('/api/reset-pair', requireLocalRequest, async (req, res) => {
   const cfg = getConfig();
   cfg.pairId = 'air_' + crypto.randomBytes(12).toString('hex');
   saveConfig(cfg);
@@ -298,7 +335,7 @@ app.get('/conectar', (req, res) => {
 // ============================================================
 // Endpoints de Google Drive (Respaldo en la Nube y Alta Velocidad)
 // ============================================================
-app.get('/auth/google', (req, res) => {
+app.get('/auth/google', requireLocalRequest, (req, res) => {
   const authUrl = drive.getAuthUrl(PORT);
   if (!authUrl) {
     return res.status(500).send('credentials.json no encontrado o inválido.');
@@ -306,10 +343,10 @@ app.get('/auth/google', (req, res) => {
   res.redirect(authUrl);
 });
 
-app.get('/auth/callback', async (req, res) => {
+app.get('/auth/callback', requireLocalRequest, async (req, res) => {
   const { code, error } = req.query;
   if (error) {
-    return res.send(`<h2>Error al autenticar con Google: ${error}</h2>`);
+    return res.status(400).send(`<h2>Error al autenticar con Google: ${escapeHtml(error)}</h2>`);
   }
   if (!code) {
     return res.status(400).send('Código de autorización no recibido');
@@ -353,7 +390,7 @@ app.get('/auth/callback', async (req, res) => {
     `);
   } catch (err) {
     console.error('Error en callback de Google Drive:', err);
-    res.status(500).send(`<h2>Error autorizando con Google Drive: ${err.message}</h2>`);
+    res.status(500).send(`<h2>Error autorizando con Google Drive: ${escapeHtml(err.message)}</h2>`);
   }
 });
 
@@ -363,7 +400,7 @@ app.get('/api/drive/status', (req, res) => {
   });
 });
 
-app.post('/api/drive/disconnect', (req, res) => {
+app.post('/api/drive/disconnect', requireLocalRequest, (req, res) => {
   const TOKENS_PATH = path.join(__dirname, 'tokens.json');
   if (fs.existsSync(TOKENS_PATH)) {
     fs.unlinkSync(TOKENS_PATH);
@@ -384,10 +421,11 @@ async function syncFromGoogleDrive() {
     let newFilesDownloaded = false;
     for (const df of driveFiles) {
       if (!df.name) continue;
-      const localPath = path.join(STORAGE_DIR, df.name);
-      if (!fs.existsSync(localPath)) {
-        console.log(`⬇️ Descargando nuevo archivo de Drive a la Laptop: ${df.name}`);
-        await drive.downloadFileFromDrive(df.id, localPath);
+      const safeTarget = resolveSafeStoragePath(df.name);
+      if (!safeTarget) continue;
+      if (!fs.existsSync(safeTarget.filePath)) {
+        console.log(`⬇️ Descargando nuevo archivo de Drive a la Laptop: ${safeTarget.safeName}`);
+        await drive.downloadFileFromDrive(df.id, safeTarget.filePath);
         newFilesDownloaded = true;
       }
     }
@@ -600,26 +638,30 @@ app.post('/share-target', upload.array('files'), (req, res) => {
   }
 });
 
-// Descarga directa con headers apropiados
+// Descarga directa con headers apropiados (protegida contra Path Traversal)
 app.get('/api/download/:filename', (req, res) => {
-  const filename = decodeURIComponent(req.params.filename);
-  const filePath = path.join(STORAGE_DIR, filename);
+  const safeTarget = resolveSafeStoragePath(decodeURIComponent(req.params.filename || ''));
+  if (!safeTarget) {
+    return res.status(400).send('Nombre de archivo inválido');
+  }
 
-  if (!fs.existsSync(filePath)) {
+  if (!fs.existsSync(safeTarget.filePath)) {
     return res.status(404).send('Archivo no encontrado');
   }
 
-  res.download(filePath, filename);
+  res.download(safeTarget.filePath, safeTarget.safeName);
 });
 
-// Eliminar archivo
+// Eliminar archivo (protegida contra Path Traversal)
 app.delete('/api/files/:filename', (req, res) => {
-  const filename = decodeURIComponent(req.params.filename);
-  const filePath = path.join(STORAGE_DIR, filename);
+  const safeTarget = resolveSafeStoragePath(decodeURIComponent(req.params.filename || ''));
+  if (!safeTarget) {
+    return res.status(400).json({ error: 'Nombre de archivo inválido' });
+  }
 
-  if (fs.existsSync(filePath)) {
+  if (fs.existsSync(safeTarget.filePath)) {
     try {
-      fs.unlinkSync(filePath);
+      fs.unlinkSync(safeTarget.filePath);
       notifyClients('files_updated', {
         message: 'Archivo eliminado',
         totalFiles: getStoredFiles()
@@ -632,8 +674,8 @@ app.delete('/api/files/:filename', (req, res) => {
   res.status(404).json({ error: 'Archivo no encontrado' });
 });
 
-// Abrir la carpeta de descargas en el explorador de Windows
-app.post('/api/open-folder', (req, res) => {
+// Abrir la carpeta de descargas en el explorador de Windows (solo acceso local)
+app.post('/api/open-folder', requireLocalRequest, (req, res) => {
   exec(`explorer.exe "${STORAGE_DIR}"`, (err) => {
     if (err) {
       return res.status(500).json({ error: 'No se pudo abrir la carpeta' });

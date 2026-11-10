@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://accounts.google.com https://apis.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://*.googleusercontent.com https://*.google.com https://*.gstatic.com; connect-src 'self' https://www.googleapis.com https://accounts.google.com https://oauth2.googleapis.com; frame-src https://accounts.google.com; object-src 'none'; base-uri 'self'; form-action 'self';">
   <title>AirLink Express - Transferencia Rápida Celular ↔ Laptop</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -70,12 +72,12 @@
     <div class="workspace-column">
       <!-- Selector de Pestañas: Archivos vs Texto & Portapapeles -->
       <nav class="workspace-tabs" role="tablist">
-        <button class="workspace-tab-btn active" id="tabNavFiles" onclick="switchMainTab('files')" role="tab" aria-selected="true">
+        <button class="workspace-tab-btn active" id="tabNavFiles" type="button" role="tab" aria-selected="true">
           <span class="tab-icon">📁</span>
           <span class="tab-label">Archivos</span>
           <span class="tab-counter" id="tabFilesBadge">0</span>
         </button>
-        <button class="workspace-tab-btn" id="tabNavChat" onclick="switchMainTab('chat')" role="tab" aria-selected="false">
+        <button class="workspace-tab-btn" id="tabNavChat" type="button" role="tab" aria-selected="false">
           <span class="tab-icon">💬</span>
           <span class="tab-label">Texto y Portapapeles</span>
           <span class="tab-counter" id="tabChatBadge">0</span>
@@ -143,7 +145,7 @@
         <div class="files-header">
           <h3>Archivos en la Nube (<span id="filesCount">0</span>)</h3>
           <div class="files-header-actions">
-            <a href="https://drive.google.com" target="_blank" class="btn-open-drive" id="btnOpenDriveFolder" title="Abrir carpeta en Google Drive">
+            <a href="https://drive.google.com" target="_blank" rel="noopener noreferrer" class="btn-open-drive" id="btnOpenDriveFolder" title="Abrir carpeta en Google Drive">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
               <span>Abrir en Drive</span>
             </a>
@@ -211,23 +213,6 @@
           </div>
         </div>
       </section>
-    </div>
-
-    <!-- Modal para Configurar Client ID si se requiere -->
-    <div class="modal-overlay" id="clientIdModal" style="display: none;">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h3>Configuración de Google Drive</h3>
-          <button class="btn-close-modal" id="btnCloseClientIdModal" title="Cerrar">&times;</button>
-        </div>
-        <p class="modal-desc">Ingresa tu Client ID de Google Cloud Console para conectar con tu cuenta de Google Drive.</p>
-        <div class="pin-change-form">
-          <input type="text" class="manual-url-input" id="customClientIdInput" placeholder="53478639551-....apps.googleusercontent.com">
-          <button class="btn btn-primary full-width" id="btnSaveClientId">
-            <span>Guardar y Conectar</span>
-          </button>
-        </div>
-      </div>
     </div>
 
     <!-- Notificación Flotante (Toast) -->
