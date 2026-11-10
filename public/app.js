@@ -957,6 +957,31 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden) loadAllData();
 });
 
+// Modal de configuración de Client ID
+const clientIdModal = document.getElementById('clientIdModal');
+const btnCloseClientIdModal = document.getElementById('btnCloseClientIdModal');
+const customClientIdInput = document.getElementById('customClientIdInput');
+const btnSaveClientId = document.getElementById('btnSaveClientId');
+
+if (btnCloseClientIdModal) {
+  btnCloseClientIdModal.addEventListener('click', () => {
+    if (clientIdModal) clientIdModal.style.display = 'none';
+  });
+}
+
+if (btnSaveClientId && customClientIdInput) {
+  btnSaveClientId.addEventListener('click', () => {
+    const val = (customClientIdInput.value || '').trim();
+    if (val) {
+      localStorage.setItem('airlink_client_id', val);
+      if (clientIdModal) clientIdModal.style.display = 'none';
+      initGoogleAuth();
+      requestDriveAccess();
+      showToast('Client ID guardado');
+    }
+  });
+}
+
 // Iniciar aplicación
 window.addEventListener('DOMContentLoaded', () => {
   initGoogleAuth();
