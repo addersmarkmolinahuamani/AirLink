@@ -1,4 +1,4 @@
-const CACHE_NAME = 'airlink-gh-v3';
+const CACHE_NAME = 'airlink-gh-v4';
 const ASSETS = [
   './',
   './index.html',

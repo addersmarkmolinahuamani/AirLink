@@ -608,6 +608,8 @@ body:not(.is-mobile-device) .mobile-only-btn {
   font-size: 0.8rem;
   font-weight: 600;
   text-decoration: none;
+  white-space: nowrap;
+  flex-shrink: 0;
   transition: var(--transition);
 }
 

@@ -121,6 +121,7 @@ const btnPasteCapture = document.getElementById('btnPasteCapture');
 const btnCamera = document.getElementById('btnCamera');
 const btnOpenDriveFolder = document.getElementById('btnOpenDriveFolder');
 const btnRefresh = document.getElementById('btnRefresh');
+const btnRefreshChat = document.getElementById('btnRefreshChat');
 
 const progressContainer = document.getElementById('progressContainer');
 const progressTitle = document.getElementById('progressTitle');
@@ -535,6 +536,7 @@ async function fetchWithAuth(url, options = {}) {
   }
 
   const send = () => fetch(url, {
+    cache: 'no-store',
     ...options,
     headers: {
       ...options.headers,
@@ -585,7 +587,7 @@ async function initializeDriveFolder() {
 
   try {
     const q = encodeURIComponent("mimeType='application/vnd.google-apps.folder' and name='AirLink Express' and trashed=false");
-    const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name)`);
+    const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&orderBy=createdTime%20asc&fields=files(id,name)`);
     const data = await res.json();
 
     if (data.files && data.files.length > 0 && isValidDriveId(data.files[0].id)) {
@@ -1068,13 +1070,21 @@ if (dropZone) {
   });
 }
 
+function triggerManualRefresh(btn) {
+  if (btn) {
+    btn.style.transform = 'rotate(180deg)';
+    setTimeout(() => { btn.style.transform = ''; }, 400);
+  }
+  loadAllData();
+  showToast('Actualizando...');
+}
+
 if (btnRefresh) {
-  btnRefresh.addEventListener('click', () => {
-    btnRefresh.style.transform = 'rotate(180deg)';
-    setTimeout(() => { btnRefresh.style.transform = ''; }, 400);
-    loadAllData();
-    showToast('Actualizando archivos...');
-  });
+  btnRefresh.addEventListener('click', () => triggerManualRefresh(btnRefresh));
+}
+
+if (btnRefreshChat) {
+  btnRefreshChat.addEventListener('click', () => triggerManualRefresh(btnRefreshChat));
 }
 
 // -------------------------------------------------------------
@@ -1094,45 +1104,75 @@ function sanitizeMessagesArray(rawMsgs) {
     }));
 }
 
-async function loadDriveMessages() {
+async function resolveMessagesFilesInDrive() {
+  const q = encodeURIComponent(`'${airlinkFolderId}' in parents and trashed=false and name = 'mensajes.json'`);
+  const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime%20desc&fields=files(id,name,modifiedTime)`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.files || []).filter(f => f && isValidDriveId(f.id));
+}
+
+async function readMessagesFromFileId(fileId) {
+  const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`);
+  if (!res.ok) return null;
+  const raw = await res.json();
+  return Array.isArray(raw) ? sanitizeMessagesArray(raw) : [];
+}
+
+async function fetchLatestDriveMessages(mergeDuplicates = false) {
   if (!isValidDriveId(airlinkFolderId)) await initializeDriveFolder();
-  if (!isValidDriveId(airlinkFolderId)) return;
+  if (!isValidDriveId(airlinkFolderId)) return null;
 
-  try {
-    if (!isValidDriveId(messagesFileId)) {
-      const q = encodeURIComponent(`'${airlinkFolderId}' in parents and trashed=false and name = 'mensajes.json'`);
-      const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
-      const data = await res.json();
-      if (data.files && data.files.length > 0 && isValidDriveId(data.files[0].id)) {
-        messagesFileId = data.files[0].id;
-        localStorage.setItem('airlink_messages_file_id', messagesFileId);
-      }
-    }
+  const files = await resolveMessagesFilesInDrive();
+  if (files.length === 0) {
+    messagesFileId = null;
+    localStorage.removeItem('airlink_messages_file_id');
+    return [];
+  }
 
-    if (isValidDriveId(messagesFileId)) {
-      const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(messagesFileId)}?alt=media`);
-      if (res.status === 404) {
-        messagesFileId = null;
-        localStorage.removeItem('airlink_messages_file_id');
-        return;
-      }
-      if (res.ok) {
-        const raw = await res.json();
-        if (Array.isArray(raw)) {
-          const msgs = sanitizeMessagesArray(raw);
-          const currentMsgIds = messagesData.map(m => m.id).join(',');
-          const newMsgIds = msgs.map(m => m.id).join(',');
-          if (currentMsgIds !== newMsgIds || messagesData.length === 0) {
-            if (messagesData.length > 0 && msgs.length > messagesData.length) {
-              playChime();
-              showToast('💬 Nuevo texto recibido');
-              if (activeMainTab !== 'chat' && chatUnreadDot) chatUnreadDot.style.display = 'block';
-            }
-            messagesData = msgs;
-            renderMessages(messagesData);
+  messagesFileId = files[0].id;
+  localStorage.setItem('airlink_messages_file_id', messagesFileId);
+
+  const primaryMsgs = await readMessagesFromFileId(messagesFileId);
+  if (!mergeDuplicates || files.length <= 1 || !primaryMsgs) {
+    return primaryMsgs;
+  }
+
+  // Si algún dispositivo creó un mensajes.json adicional antes, unificar por ID
+  const seen = new Set(primaryMsgs.map(m => m.id));
+  const merged = [...primaryMsgs];
+  for (let i = 1; i < Math.min(files.length, 3); i++) {
+    try {
+      const extra = await readMessagesFromFileId(files[i].id);
+      if (extra) {
+        extra.forEach(m => {
+          if (!seen.has(m.id)) {
+            seen.add(m.id);
+            merged.push(m);
           }
-        }
+        });
       }
+    } catch (e) {}
+  }
+  merged.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  return merged.slice(0, 300);
+}
+
+async function loadDriveMessages() {
+  try {
+    const msgs = await fetchLatestDriveMessages(true);
+    if (!Array.isArray(msgs)) return;
+
+    const currentSignature = messagesData.map(m => m.id).join(',');
+    const newSignature = msgs.map(m => m.id).join(',');
+    if (currentSignature !== newSignature || messagesData.length === 0) {
+      if (messagesData.length > 0 && msgs.length > messagesData.length) {
+        playChime();
+        showToast('💬 Nuevo texto recibido');
+        if (activeMainTab !== 'chat' && chatUnreadDot) chatUnreadDot.style.display = 'block';
+      }
+      messagesData = msgs;
+      renderMessages(messagesData);
     }
   } catch (e) {
     console.error('Error cargando mensajes de Drive:', e);
@@ -1141,39 +1181,60 @@ async function loadDriveMessages() {
 
 async function saveDriveMessages(msgs) {
   if (!isValidDriveId(airlinkFolderId)) await initializeDriveFolder();
-  if (!isValidDriveId(airlinkFolderId)) return;
+  if (!isValidDriveId(airlinkFolderId)) return false;
 
   const content = JSON.stringify(msgs, null, 2);
 
   try {
+    // Asegurar que no creemos mensajes.json duplicado si otro dispositivo ya lo creó
+    if (!isValidDriveId(messagesFileId)) {
+      const existing = await resolveMessagesFilesInDrive();
+      if (existing.length > 0) {
+        messagesFileId = existing[0].id;
+        localStorage.setItem('airlink_messages_file_id', messagesFileId);
+      }
+    }
+
     if (isValidDriveId(messagesFileId)) {
-      await fetchWithAuth(`https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(messagesFileId)}?uploadType=media`, {
+      const patchRes = await fetchWithAuth(`https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(messagesFileId)}?uploadType=media`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: content
       });
-    } else {
-      const metadata = {
-        name: 'mensajes.json',
-        parents: [airlinkFolderId],
-        mimeType: 'application/json'
-      };
-      const form = new FormData();
-      form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-      form.append('file', new Blob([content], { type: 'application/json' }));
-
-      const res = await fetchWithAuth('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
-        method: 'POST',
-        body: form
-      });
-      const data = await res.json();
-      if (data && isValidDriveId(data.id)) {
-        messagesFileId = data.id;
-        localStorage.setItem('airlink_messages_file_id', messagesFileId);
+      if (patchRes.ok) return true;
+      if (patchRes.status === 404) {
+        messagesFileId = null;
+        localStorage.removeItem('airlink_messages_file_id');
+      } else {
+        throw new Error(`Error PATCH (${patchRes.status})`);
       }
     }
+
+    const metadata = {
+      name: 'mensajes.json',
+      parents: [airlinkFolderId],
+      mimeType: 'application/json'
+    };
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+    form.append('file', new Blob([content], { type: 'application/json' }));
+
+    const res = await fetchWithAuth('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+      method: 'POST',
+      body: form
+    });
+    if (!res.ok) throw new Error(`Error POST (${res.status})`);
+    const data = await res.json();
+    if (data && isValidDriveId(data.id)) {
+      messagesFileId = data.id;
+      localStorage.setItem('airlink_messages_file_id', messagesFileId);
+      return true;
+    }
+    return false;
   } catch (e) {
     console.error('Error guardando mensajes en Drive:', e);
+    showToast('⚠️ No se pudo guardar en Drive. Revisa tu conexión.');
+    return false;
   }
 }
 
@@ -1237,28 +1298,27 @@ function renderMessages(messages) {
     const timeFormatted = isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const senderIcon = msg.device === 'mobile' ? '📱' : '💻';
 
-    const metaRow = document.createElement('div');
-    metaRow.className = 'message-meta-row';
+    const headerRow = document.createElement('div');
+    headerRow.className = 'message-header';
 
-    const senderEl = document.createElement('span');
-    senderEl.className = 'message-sender';
-    senderEl.textContent = `${senderIcon} ${msg.sender}${isMe ? ' (Tú)' : ''}`;
+    const senderInfo = document.createElement('div');
+    senderInfo.className = 'message-sender-info';
+
+    const senderBadge = document.createElement('span');
+    senderBadge.className = 'message-sender-badge';
+    senderBadge.textContent = `${senderIcon} ${msg.sender}${isMe ? ' (Tú)' : ''}`;
 
     const timeEl = document.createElement('span');
     timeEl.className = 'message-time';
     timeEl.textContent = timeFormatted;
 
-    metaRow.append(senderEl, timeEl);
-
-    const contentEl = document.createElement('div');
-    contentEl.className = 'message-text-content';
-    contentEl.appendChild(linkifyToFragment(msg.text));
+    senderInfo.append(senderBadge, timeEl);
 
     const actionsRow = document.createElement('div');
-    actionsRow.className = 'message-actions-row';
+    actionsRow.className = 'message-actions';
 
     const copyBtn = document.createElement('button');
-    copyBtn.className = 'btn-msg-action btn-copy-msg';
+    copyBtn.className = 'btn-msg-copy';
     copyBtn.type = 'button';
     copyBtn.title = 'Copiar texto al portapapeles';
     copyBtn.appendChild(createSvgIcon(14, 14, [
@@ -1272,7 +1332,7 @@ function renderMessages(messages) {
     copyBtn.addEventListener('click', () => copyMessageText(msg.id, copyBtn));
 
     const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'btn-msg-action delete';
+    deleteBtn.className = 'btn-msg-delete';
     deleteBtn.type = 'button';
     deleteBtn.title = 'Eliminar mensaje';
     deleteBtn.appendChild(createSvgIcon(13, 13, [
@@ -1282,7 +1342,13 @@ function renderMessages(messages) {
     deleteBtn.addEventListener('click', () => deleteMessage(msg.id));
 
     actionsRow.append(copyBtn, deleteBtn);
-    card.append(metaRow, contentEl, actionsRow);
+    headerRow.append(senderInfo, actionsRow);
+
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'message-body';
+    bodyEl.appendChild(linkifyToFragment(msg.text));
+
+    card.append(headerRow, bodyEl);
     frag.appendChild(card);
   });
 
@@ -1341,17 +1407,37 @@ async function sendMessage() {
     createdAt: new Date().toISOString()
   };
 
-  messagesData.unshift(newMsg);
-  if (messagesData.length > 300) messagesData.pop();
-
   chatInput.value = '';
   if (chatCharCounter) chatCharCounter.textContent = '0 caracteres';
+
+  // Leer últimos mensajes remotos antes de guardar para no pisar mensajes de otro dispositivo
+  try {
+    const remoteMsgs = await fetchLatestDriveMessages(false);
+    if (Array.isArray(remoteMsgs) && remoteMsgs.length > 0) {
+      const seen = new Set([newMsg.id]);
+      const merged = [newMsg];
+      remoteMsgs.forEach(m => {
+        if (!seen.has(m.id)) {
+          seen.add(m.id);
+          merged.push(m);
+        }
+      });
+      messagesData = merged.slice(0, 300);
+    } else {
+      messagesData.unshift(newMsg);
+      if (messagesData.length > 300) messagesData.pop();
+    }
+  } catch (e) {
+    messagesData.unshift(newMsg);
+    if (messagesData.length > 300) messagesData.pop();
+  }
+
   renderMessages(messagesData);
-
-  playChime();
-  showToast('Texto enviado');
-
-  await saveDriveMessages(messagesData);
+  const saved = await saveDriveMessages(messagesData);
+  if (saved) {
+    playChime();
+    showToast('Texto enviado a Drive');
+  }
 }
 
 if (btnSendText) btnSendText.addEventListener('click', sendMessage);
@@ -1430,6 +1516,9 @@ function switchMainTab(tab) {
     if (chatTabSection) chatTabSection.style.display = 'flex';
     if (chatUnreadDot) chatUnreadDot.style.display = 'none';
     if (chatMessagesList) chatMessagesList.scrollTop = 0;
+    ensureValidToken().then((ok) => {
+      if (ok) loadDriveMessages();
+    });
   }
 }
 

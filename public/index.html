@@ -177,7 +177,10 @@
           </div>
           <div class="chat-header-actions">
             <span class="badge-pill highlight">Sincronizado</span>
-            <button class="btn-clear-chat" id="btnClearChat" title="Vaciar textos">
+            <button class="btn-refresh" id="btnRefreshChat" type="button" title="Actualizar textos">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path></svg>
+            </button>
+            <button class="btn-clear-chat" id="btnClearChat" type="button" title="Vaciar textos">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
               <span>Vaciar</span>
             </button>
@@ -185,35 +188,35 @@
         </div>
 
         <!-- Área de Entrada de Texto -->
-        <div class="chat-input-container">
+        <div class="chat-input-box">
           <textarea id="chatInput" placeholder="Escribe o pega texto, enlaces o notas aquí..." rows="3"></textarea>
-          <div class="chat-input-toolbar">
-            <div class="chat-toolbar-left">
-              <button class="btn-chat-tool" id="btnPasteText" type="button" title="Pegar texto copiado del portapapeles">
+          <div class="chat-input-footer">
+            <div class="chat-footer-left">
+              <button class="btn btn-secondary btn-sm" id="btnPasteText" type="button" title="Pegar texto copiado del portapapeles">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>
                 <span>Pegar Portapapeles</span>
               </button>
-              <span class="chat-char-count" id="chatCharCounter">0 caracteres</span>
+              <span class="chat-char-counter" id="chatCharCounter">0 caracteres</span>
             </div>
-            <button class="btn btn-primary btn-send-chat" id="btnSendText" type="button">
-              <span>Enviar</span>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-            </button>
+            <div class="chat-footer-right">
+              <button class="btn btn-primary btn-sm" id="btnSendText" type="button">
+                <span>Enviar</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+              </button>
+            </div>
           </div>
         </div>
 
         <!-- Historial de Mensajes -->
-        <div class="chat-messages-wrap">
-          <div class="chat-messages-header">
-            <h4>Historial de Textos (<span id="messagesCount">0</span>)</h4>
-            <span class="chat-hint">Toca "Copiar" en cualquier mensaje para pegarlo en tu celular o laptop</span>
-          </div>
-          <div class="chat-messages-list" id="chatMessagesList">
-            <div class="empty-state chat-empty" id="emptyChatState">
-              <div class="empty-icon">💬</div>
-              <p>No hay textos compartidos aún</p>
-              <span>Escribe un mensaje o pega enlaces arriba para enviarlos entre tus dispositivos</span>
-            </div>
+        <div class="chat-messages-header">
+          <h3>Historial de Textos (<span id="messagesCount">0</span>)</h3>
+          <span class="auto-sync-hint">Toca "Copiar" para usar en otro dispositivo</span>
+        </div>
+        <div class="chat-messages-list" id="chatMessagesList">
+          <div class="empty-state chat-empty" id="emptyChatState">
+            <div class="empty-icon">💬</div>
+            <p>No hay textos compartidos aún</p>
+            <span>Escribe un mensaje o pega enlaces arriba para enviarlos entre tus dispositivos</span>
           </div>
         </div>
       </section>
