@@ -1,10 +1,11 @@
-// AirLink Express - Nube Directa en Google Drive (Serverless)
+// AirLink Express - Chat Unificado Multimedia en la Nube (Estilo WhatsApp Web)
 // Compatible con GitHub Pages, Celular y Laptop sin consumir recursos locales
 
 const CLIENT_ID = '53478639551-2ndvvqghcmmnld49m3jktf8j2ji1m1pg.apps.googleusercontent.com';
 const SCOPES = 'https://www.googleapis.com/auth/drive';
 const SAFE_DRIVE_ID_RE = /^[a-zA-Z0-9_-]{10,128}$/;
 const SAFE_SCRIPT_URL_RE = /^https:\/\/script\.google\.com\/macros\/s\/[a-zA-Z0-9_-]{20,180}\/exec$/;
+const clientInstanceId = 'dev_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
 
 function isValidDriveId(id) {
   return typeof id === 'string' && SAFE_DRIVE_ID_RE.test(id);
@@ -42,39 +43,70 @@ function createSvgIcon(width, height, markupNodes) {
   return svg;
 }
 
-function clearStoredSession(clearFolder = false) {
-  accessToken = null;
-  tokenExpiry = 0;
+// Limpiar por única vez tokens antiguos de solo-lectura guardados antes de actualizar Code.gs
+if (localStorage.getItem('airlink_token_v6') !== '1') {
   localStorage.removeItem('airlink_drive_token');
   localStorage.removeItem('airlink_token_expiry');
-  localStorage.removeItem('airlink_client_id');
-  if (clearFolder) {
-    airlinkFolderId = null;
-    messagesFileId = null;
-    localStorage.removeItem('airlink_folder_id');
-    localStorage.removeItem('airlink_messages_file_id');
-  }
+  localStorage.removeItem('airlink_messages_file_id');
+  localStorage.setItem('airlink_token_v6', '1');
 }
 
 let tokenClient = null;
 let tokenRefreshPromise = null;
 let accessToken = localStorage.getItem('airlink_drive_token') || null;
 let tokenExpiry = parseInt(localStorage.getItem('airlink_token_expiry') || '0', 10);
+let tokenSource = localStorage.getItem('airlink_token_source') || 'script';
+let scriptSupportsMessages = localStorage.getItem('airlink_script_v2') === '1';
+let writePermissionMissing = false;
+
 const storedScriptUrl = localStorage.getItem('airlink_script_url');
 let instantScriptUrl = isValidScriptUrl(storedScriptUrl) ? storedScriptUrl.trim() : null;
 let instantAccessKey = localStorage.getItem('airlink_access_key') || null;
 const storedFolderId = localStorage.getItem('airlink_folder_id');
 let airlinkFolderId = isValidDriveId(storedFolderId) ? storedFolderId : null;
-let activeMainTab = 'files';
+let allAirlinkFolderIds = isValidDriveId(airlinkFolderId) ? [airlinkFolderId] : [];
+let activeStreamFilter = 'all'; // 'all' | 'messages' | 'files'
+
+function buildParentsQuery() {
+  const ids = (allAirlinkFolderIds.length > 0 ? allAirlinkFolderIds : [airlinkFolderId]).filter(isValidDriveId);
+  if (ids.length === 0) return '';
+  if (ids.length === 1) return `'${ids[0]}' in parents`;
+  return `(${ids.map(id => `'${id}' in parents`).join(' or ')})`;
+}
 
 function hasInstantConfig() {
   return isValidScriptUrl(instantScriptUrl) && typeof instantAccessKey === 'string' && instantAccessKey.length >= 8;
 }
 
+function clearStoredSession(clearFolder = false) {
+  accessToken = null;
+  tokenExpiry = 0;
+  localStorage.removeItem('airlink_drive_token');
+  localStorage.removeItem('airlink_token_expiry');
+  localStorage.removeItem('airlink_token_source');
+  localStorage.removeItem('airlink_client_id');
+  if (clearFolder) {
+    airlinkFolderId = null;
+    allAirlinkFolderIds = [];
+    messagesFileId = null;
+    localStorage.removeItem('airlink_folder_id');
+    localStorage.removeItem('airlink_messages_file_id');
+  }
+}
+
 let filesData = [];
 let messagesData = [];
+let hasRenderedFilesOnce = false;
+let hasRenderedMessagesOnce = false;
 const storedMessagesFileId = localStorage.getItem('airlink_messages_file_id');
 let messagesFileId = isValidDriveId(storedMessagesFileId) ? storedMessagesFileId : null;
+
+// Canal en tiempo real (estilo WhatsApp Web)
+let realtimeTopic = null;
+let realtimeEventSource = null;
+let backgroundSyncTimer = null;
+let isSyncingFiles = false;
+let isSyncingMessages = false;
 
 // Detección de dispositivo (Móvil vs Laptop)
 const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth <= 860;
@@ -104,15 +136,6 @@ const btnCloseShareModal = document.getElementById('btnCloseShareModal');
 const shareDeviceLinkInput = document.getElementById('shareDeviceLinkInput');
 const btnCopyShareLink = document.getElementById('btnCopyShareLink');
 
-const tabNavFiles = document.getElementById('tabNavFiles');
-const tabNavChat = document.getElementById('tabNavChat');
-const tabFilesBadge = document.getElementById('tabFilesBadge');
-const tabChatBadge = document.getElementById('tabChatBadge');
-const chatUnreadDot = document.getElementById('chatUnreadDot');
-
-const filesTabSection = document.getElementById('filesTabSection');
-const chatTabSection = document.getElementById('chatTabSection');
-
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const cameraInput = document.getElementById('cameraInput');
@@ -121,7 +144,6 @@ const btnPasteCapture = document.getElementById('btnPasteCapture');
 const btnCamera = document.getElementById('btnCamera');
 const btnOpenDriveFolder = document.getElementById('btnOpenDriveFolder');
 const btnRefresh = document.getElementById('btnRefresh');
-const btnRefreshChat = document.getElementById('btnRefreshChat');
 
 const progressContainer = document.getElementById('progressContainer');
 const progressTitle = document.getElementById('progressTitle');
@@ -129,18 +151,21 @@ const progressBarFill = document.getElementById('progressBarFill');
 const progressPercent = document.getElementById('progressPercent');
 const progressInfo = document.getElementById('progressInfo');
 
-const filesList = document.getElementById('filesList');
-const filesCount = document.getElementById('filesCount');
-const emptyState = document.getElementById('emptyState');
-
 const chatInput = document.getElementById('chatInput');
 const btnSendText = document.getElementById('btnSendText');
 const btnPasteText = document.getElementById('btnPasteText');
 const btnClearChat = document.getElementById('btnClearChat');
 const chatCharCounter = document.getElementById('chatCharCounter');
-const chatMessagesList = document.getElementById('chatMessagesList');
-const emptyChatState = document.getElementById('emptyChatState');
-const messagesCount = document.getElementById('messagesCount');
+
+const filterAll = document.getElementById('filterAll');
+const filterMsgs = document.getElementById('filterMsgs');
+const filterFiles = document.getElementById('filterFiles');
+const countAll = document.getElementById('countAll');
+const countMsgs = document.getElementById('countMsgs');
+const countFiles = document.getElementById('countFiles');
+
+const unifiedStreamList = document.getElementById('unifiedStreamList');
+const emptyStreamState = document.getElementById('emptyStreamState');
 
 const toast = document.getElementById('toast');
 const toastMessage = document.getElementById('toastMessage');
@@ -162,13 +187,15 @@ if (isMobile) {
 // -------------------------------------------------------------
 // Notificaciones Toast y Sonido
 // -------------------------------------------------------------
-function showToast(msg) {
+let toastTimer = null;
+function showToast(msg, duration = 3800) {
   if (!toast || !toastMessage) return;
   toastMessage.textContent = msg;
   toast.classList.add('show');
-  setTimeout(() => {
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
     toast.classList.remove('show');
-  }, 3500);
+  }, duration);
 }
 
 function playChime() {
@@ -189,6 +216,118 @@ function playChime() {
 }
 
 // -------------------------------------------------------------
+// Sincronización en Tiempo Real Tipo WhatsApp Web (Push + Delta Silencioso)
+// -------------------------------------------------------------
+async function computeRealtimeTopic() {
+  const seed = hasInstantConfig()
+    ? `airlink_rt_v5_${instantScriptUrl}_${instantAccessKey}`
+    : (isValidDriveId(airlinkFolderId) ? `airlink_rt_v5_folder_${airlinkFolderId}` : null);
+  if (!seed) return null;
+
+  try {
+    const enc = new TextEncoder().encode(seed);
+    const hashBuf = await crypto.subtle.digest('SHA-256', enc);
+    const hex = Array.from(new Uint8Array(hashBuf))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('')
+      .slice(0, 26);
+    return `airlink_ws_${hex}`;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function startRealtimeSync() {
+  const topic = await computeRealtimeTopic();
+  if (!topic) return;
+
+  if (realtimeTopic !== topic || !realtimeEventSource) {
+    stopRealtimeSync();
+    realtimeTopic = topic;
+
+    try {
+      const es = new EventSource(`https://ntfy.sh/${encodeURIComponent(topic)}/sse`);
+      es.onmessage = (evt) => {
+        try {
+          const wrapper = JSON.parse(evt.data);
+          if (!wrapper || wrapper.event !== 'message' || !wrapper.message) return;
+          const payload = JSON.parse(wrapper.message);
+          if (!payload || payload.senderId === clientInstanceId) return;
+
+          if (payload.mfId && isValidDriveId(payload.mfId)) {
+            messagesFileId = payload.mfId;
+            localStorage.setItem('airlink_messages_file_id', messagesFileId);
+          }
+
+          if (payload.type === 'chat') {
+            loadDriveMessages({ silent: true });
+            setTimeout(() => loadDriveMessages({ silent: true }), 1200);
+          } else if (payload.type === 'files') {
+            loadDriveFiles({ silent: true });
+            setTimeout(() => loadDriveFiles({ silent: true }), 1500);
+          } else {
+            loadAllData({ silent: true });
+          }
+        } catch (e) {}
+      };
+      realtimeEventSource = es;
+    } catch (e) {}
+  }
+
+  if (!backgroundSyncTimer) {
+    backgroundSyncTimer = setInterval(() => {
+      if (document.visibilityState === 'visible' && (isTokenValid() || hasInstantConfig())) {
+        loadAllData({ silent: true });
+      }
+    }, 6000);
+  }
+}
+
+function stopRealtimeSync() {
+  if (realtimeEventSource) {
+    try { realtimeEventSource.close(); } catch (e) {}
+    realtimeEventSource = null;
+  }
+  realtimeTopic = null;
+  if (backgroundSyncTimer) {
+    clearInterval(backgroundSyncTimer);
+    backgroundSyncTimer = null;
+  }
+}
+
+async function notifyPeerDevices(type = 'all', extra = {}) {
+  if (!realtimeTopic) {
+    realtimeTopic = await computeRealtimeTopic();
+  }
+  if (!realtimeTopic) return;
+
+  try {
+    await fetch(`https://ntfy.sh/${encodeURIComponent(realtimeTopic)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        senderId: clientInstanceId,
+        type,
+        t: Date.now(),
+        ...extra
+      })
+    });
+  } catch (e) {}
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && (isTokenValid() || hasInstantConfig())) {
+    loadAllData({ silent: true });
+  }
+});
+
+window.addEventListener('focus', () => {
+  if (isTokenValid() || hasInstantConfig()) {
+    loadAllData({ silent: true });
+  }
+});
+
+// -------------------------------------------------------------
 // Modo Permanente Instantáneo (Apps Script) + GIS Respaldo
 // -------------------------------------------------------------
 function processHashPairing() {
@@ -197,7 +336,6 @@ function processHashPairing() {
     if (!hash.startsWith('#link=')) return false;
 
     const encoded = hash.slice(6);
-    // Borrar de inmediato el hash de la barra/historial
     history.replaceState(null, '', window.location.pathname + window.location.search);
 
     const jsonStr = decodeURIComponent(escape(atob(encoded.replace(/-/g, '+').replace(/_/g, '/'))));
@@ -216,35 +354,61 @@ function processHashPairing() {
   return false;
 }
 
-async function fetchInstantToken(customUrl = null, customKey = null) {
+async function callInstantScript(payload = {}, customUrl = null, customKey = null) {
   const targetUrl = (customUrl || instantScriptUrl || '').trim();
   const targetKey = customKey || instantAccessKey || '';
   if (!isValidScriptUrl(targetUrl) || targetKey.length < 8) {
     throw new Error('Configuración instantánea inválida');
   }
 
+  const res = await fetch(targetUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({
+      key: targetKey,
+      ...payload
+    })
+  });
+
+  if (!res.ok) {
+    throw new Error(`Error de conexión (${res.status})`);
+  }
+
+  return res.json();
+}
+
+async function fetchInstantToken(customUrl = null, customKey = null) {
   if (!customUrl && tokenRefreshPromise) {
     return tokenRefreshPromise;
   }
 
   const execRequest = async () => {
-    const res = await fetch(targetUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ key: targetKey })
-    });
-    if (!res.ok) {
-      throw new Error(`Error de conexión (${res.status})`);
-    }
-    const data = await res.json();
+    const data = await callInstantScript({ action: 'auth' }, customUrl, customKey);
     if (!data || !data.ok || !data.access_token) {
       throw new Error((data && data.error) || 'No se pudo obtener autorización de Drive');
     }
+
     accessToken = data.access_token;
     const expiresIn = parseInt(data.expires_in || '2400', 10);
     tokenExpiry = Date.now() + expiresIn * 1000;
+    tokenSource = 'script';
     localStorage.setItem('airlink_drive_token', accessToken);
     localStorage.setItem('airlink_token_expiry', String(tokenExpiry));
+    localStorage.setItem('airlink_token_source', 'script');
+
+    if (data.folder_id && isValidDriveId(data.folder_id) && !isValidDriveId(airlinkFolderId)) {
+      airlinkFolderId = data.folder_id;
+      allAirlinkFolderIds = [airlinkFolderId];
+      localStorage.setItem('airlink_folder_id', airlinkFolderId);
+      updateDriveFolderLink();
+    }
+
+    if (Array.isArray(data.messages)) {
+      scriptSupportsMessages = true;
+      localStorage.setItem('airlink_script_v2', '1');
+      writePermissionMissing = false;
+    }
+
     return accessToken;
   };
 
@@ -289,15 +453,19 @@ function initGoogleAuth() {
           accessToken = tokenResponse.access_token;
           const expiresIn = parseInt(tokenResponse.expires_in || '3599', 10);
           tokenExpiry = Date.now() + expiresIn * 1000;
+          tokenSource = 'gis';
+          writePermissionMissing = false;
           localStorage.setItem('airlink_drive_token', accessToken);
           localStorage.setItem('airlink_token_expiry', String(tokenExpiry));
+          localStorage.setItem('airlink_token_source', 'gis');
 
           updateAuthUI(true);
-          showToast('☁️ Conectado con éxito a Google Drive');
+          showToast('✅ Permiso de lectura y escritura activado en Google Drive');
           playChime();
 
           await initializeDriveFolder();
-          loadAllData();
+          startRealtimeSync();
+          loadAllData({ silent: false });
         }
       }
     });
@@ -321,6 +489,12 @@ function requestDriveAccess() {
   }
 }
 
+function markWritePermissionNeeded() {
+  writePermissionMissing = true;
+  updateAuthUI(true);
+  showToast('⚠️ Tu Code.gs actual solo tiene permiso de lectura. Actualízalo o pulsa "🔑 Autorizar Escritura" arriba.', 6000);
+}
+
 function openInstantSetupModal() {
   if (instantSetupError) {
     instantSetupError.style.display = 'none';
@@ -342,7 +516,7 @@ function openShareDeviceModal() {
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '');
-  const magicLink = `${window.location.origin}${window.location.pathname}#link=${base64}`;
+  const magicLink = `${window.location.origin}${window.location.pathname}?v=7#link=${base64}`;
   if (shareDeviceLinkInput) shareDeviceLinkInput.value = magicLink;
   if (shareDeviceModal) shareDeviceModal.style.display = 'flex';
 }
@@ -350,26 +524,30 @@ function openShareDeviceModal() {
 function disconnectDrive(unlinkInstant = false) {
   const tokenToRevoke = accessToken;
   const wasInstant = hasInstantConfig();
+  stopRealtimeSync();
   clearStoredSession(true);
 
   if (unlinkInstant || wasInstant) {
     instantScriptUrl = null;
     instantAccessKey = null;
+    scriptSupportsMessages = false;
     localStorage.removeItem('airlink_script_url');
     localStorage.removeItem('airlink_access_key');
+    localStorage.removeItem('airlink_script_v2');
   }
 
   filesData = [];
   messagesData = [];
-  renderFiles([]);
-  renderMessages([]);
+  hasRenderedFilesOnce = false;
+  hasRenderedMessagesOnce = false;
+  renderUnifiedStream();
   updateAuthUI(false);
 
   if (btnOpenDriveFolder) {
     btnOpenDriveFolder.href = 'https://drive.google.com';
   }
 
-  if (tokenToRevoke && !wasInstant && typeof google !== 'undefined' && google.accounts && google.accounts.oauth2) {
+  if (tokenToRevoke && tokenSource === 'gis' && typeof google !== 'undefined' && google.accounts && google.accounts.oauth2) {
     try {
       google.accounts.oauth2.revoke(tokenToRevoke, () => {});
     } catch (e) {}
@@ -387,22 +565,37 @@ function updateAuthUI(connected) {
     }
     if (driveAuthText) driveAuthText.textContent = instantActive ? '⚡ Drive Activo ✓' : 'Drive Conectado ✓';
     if (driveBanner) driveBanner.classList.add('connected');
-    if (driveBannerIcon) driveBannerIcon.textContent = instantActive ? '⚡' : '☁️';
+    if (driveBannerIcon) driveBannerIcon.textContent = writePermissionMissing ? '⚠️' : (instantActive ? '⚡' : '☁️');
     if (driveBannerTitle) {
-      driveBannerTitle.textContent = instantActive
-        ? '⚡ Conexión Instantánea Activa'
-        : '☁️ Google Drive Activo (1h)';
+      if (writePermissionMissing) {
+        driveBannerTitle.textContent = '⚠️ Permiso de Escritura Pendiente en Code.gs';
+      } else {
+        driveBannerTitle.textContent = instantActive
+          ? '⚡ Conexión Instantánea Activa (Tiempo Real)'
+          : '☁️ Google Drive Activo (1h)';
+      }
     }
     if (driveBannerDesc) {
-      driveBannerDesc.textContent = instantActive
-        ? 'Entras directo cada vez que abres la web sin volver a iniciar sesión. Carpeta: "AirLink Express".'
-        : 'Tus archivos se guardan directamente en tu carpeta "AirLink Express" de Google Drive.';
+      if (writePermissionMissing) {
+        driveBannerDesc.textContent = 'Tu script actual solo tiene permiso de lectura. Actualiza tu Code.gs o pulsa "🔑 Autorizar Escritura" para enviar.';
+      } else {
+        driveBannerDesc.textContent = instantActive
+          ? 'Sincronizado como WhatsApp Web entre tu Laptop y Celular. Carpeta: "AirLink Express".'
+          : 'Tus archivos y textos se guardan directamente en tu carpeta "AirLink Express" de Google Drive.';
+      }
     }
     if (btnDriveAction) {
       btnDriveAction.classList.add('connected');
       btnDriveAction.textContent = '✓ Conectado';
     }
-    if (btnGoogleFallback) btnGoogleFallback.style.display = 'none';
+    if (btnGoogleFallback) {
+      if (writePermissionMissing) {
+        btnGoogleFallback.style.display = 'inline-flex';
+        btnGoogleFallback.textContent = '🔑 Autorizar Escritura';
+      } else {
+        btnGoogleFallback.style.display = 'none';
+      }
+    }
     if (btnShareDevice) btnShareDevice.style.display = instantActive ? 'inline-flex' : 'none';
   } else {
     if (btnDriveAuth) {
@@ -420,7 +613,10 @@ function updateAuthUI(connected) {
       btnDriveAction.classList.remove('connected');
       btnDriveAction.textContent = '⚡ Configurar Acceso Rápido';
     }
-    if (btnGoogleFallback) btnGoogleFallback.style.display = 'inline-flex';
+    if (btnGoogleFallback) {
+      btnGoogleFallback.style.display = 'inline-flex';
+      btnGoogleFallback.textContent = 'Google (1h)';
+    }
     if (btnShareDevice) btnShareDevice.style.display = 'none';
   }
 }
@@ -513,7 +709,8 @@ if (btnSaveInstantSetup) {
       playChime();
       showToast('⚡ ¡Acceso permanente activado!');
       await initializeDriveFolder();
-      loadAllData();
+      startRealtimeSync();
+      loadAllData({ silent: false });
     } catch (err) {
       showSetupError(err.message || 'No se pudo conectar con Apps Script. Revisa la URL, la clave y que esté desplegado como "Cualquier usuario".');
     } finally {
@@ -545,7 +742,7 @@ async function fetchWithAuth(url, options = {}) {
   });
 
   let res = await send();
-  if (res.status === 401 && hasInstantConfig()) {
+  if ((res.status === 401 || res.status === 403) && hasInstantConfig()) {
     clearStoredSession(false);
     try {
       await fetchInstantToken();
@@ -570,34 +767,27 @@ function updateDriveFolderLink() {
 
 // Localizar o crear la carpeta "AirLink Express"
 async function initializeDriveFolder() {
-  if (isValidDriveId(airlinkFolderId)) {
-    try {
-      const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(airlinkFolderId)}?fields=id,name,trashed`);
-      if (res.ok) {
-        const d = await res.json();
-        if (d && isValidDriveId(d.id) && !d.trashed) {
-          updateDriveFolderLink();
-          return airlinkFolderId;
-        }
-      }
-    } catch (e) {}
-    airlinkFolderId = null;
-    localStorage.removeItem('airlink_folder_id');
-  }
-
   try {
     const q = encodeURIComponent("mimeType='application/vnd.google-apps.folder' and name='AirLink Express' and trashed=false");
     const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&orderBy=createdTime%20asc&fields=files(id,name)`);
-    const data = await res.json();
+    if (res.ok) {
+      const data = await res.json();
+      const validIds = (data.files || []).map(f => f && f.id).filter(isValidDriveId).slice(0, 5);
+      if (validIds.length > 0) {
+        airlinkFolderId = validIds[0];
+        allAirlinkFolderIds = validIds;
+        localStorage.setItem('airlink_folder_id', airlinkFolderId);
+        updateDriveFolderLink();
+        return airlinkFolderId;
+      }
+    }
 
-    if (data.files && data.files.length > 0 && isValidDriveId(data.files[0].id)) {
-      airlinkFolderId = data.files[0].id;
-      localStorage.setItem('airlink_folder_id', airlinkFolderId);
+    if (isValidDriveId(airlinkFolderId)) {
+      if (!allAirlinkFolderIds.includes(airlinkFolderId)) allAirlinkFolderIds = [airlinkFolderId];
       updateDriveFolderLink();
       return airlinkFolderId;
     }
 
-    // Crear carpeta
     const createRes = await fetchWithAuth('https://www.googleapis.com/drive/v3/files', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -606,9 +796,14 @@ async function initializeDriveFolder() {
         mimeType: 'application/vnd.google-apps.folder'
       })
     });
+    if (createRes.status === 403) {
+      markWritePermissionNeeded();
+      return null;
+    }
     const folder = await createRes.json();
     if (folder && isValidDriveId(folder.id)) {
       airlinkFolderId = folder.id;
+      allAirlinkFolderIds = [airlinkFolderId];
       localStorage.setItem('airlink_folder_id', airlinkFolderId);
       updateDriveFolderLink();
       return airlinkFolderId;
@@ -616,17 +811,21 @@ async function initializeDriveFolder() {
     return null;
   } catch (err) {
     console.error('Error buscando/creando carpeta AirLink Express:', err);
-    return null;
+    return isValidDriveId(airlinkFolderId) ? airlinkFolderId : null;
   }
 }
 
-// Cargar lista de archivos de Google Drive
-async function loadDriveFiles() {
-  if (!isValidDriveId(airlinkFolderId)) await initializeDriveFolder();
-  if (!isValidDriveId(airlinkFolderId)) return;
+// Cargar lista de archivos de Google Drive (sin parpadeos)
+async function loadDriveFiles(opts = {}) {
+  if (isSyncingFiles && !opts.force) return;
+  isSyncingFiles = true;
 
   try {
-    const q = encodeURIComponent(`'${airlinkFolderId}' in parents and trashed=false and name != 'mensajes.json'`);
+    if (!isValidDriveId(airlinkFolderId) || allAirlinkFolderIds.length === 0) await initializeDriveFolder();
+    const parentsClause = buildParentsQuery();
+    if (!parentsClause) return;
+
+    const q = encodeURIComponent(`${parentsClause} and trashed=false and name != 'mensajes.json'`);
     const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,size,mimeType,createdTime,webViewLink,webContentLink,thumbnailLink)&orderBy=createdTime desc&pageSize=100`;
 
     const res = await fetchWithAuth(url);
@@ -639,16 +838,17 @@ async function loadDriveFiles() {
         const isImg = mime.startsWith('image/');
         const isVid = mime.startsWith('video/');
         const isAud = mime.startsWith('audio/');
-        const isDoc = mime.includes('word') || mime.includes('document');
+        const isDoc = mime.includes('word') || mime.includes('document') || mime.includes('sheet') || mime.includes('presentation');
         const isPdf = mime.includes('pdf');
         const parsedSize = parseInt(f.size || '0', 10);
 
         return {
           id: f.id,
+          streamType: 'file',
           name: f.name,
           size: Number.isFinite(parsedSize) ? parsedSize : 0,
           formattedSize: formatBytes(Number.isFinite(parsedSize) ? parsedSize : 0),
-          createdAt: f.createdTime,
+          createdAt: f.createdTime || new Date(0).toISOString(),
           mimeType: mime,
           webViewLink: isSafeHttpUrl(f.webViewLink, true) ? f.webViewLink : null,
           thumbnailLink: isSafeHttpUrl(f.thumbnailLink, true) ? f.thumbnailLink : null,
@@ -660,19 +860,25 @@ async function loadDriveFiles() {
         };
       });
 
-    // Solo actualizar la vista si los archivos realmente cambiaron
     const currentIds = filesData.map(f => f.id).join(',');
     const newIds = newFiles.map(f => f.id).join(',');
-    if (currentIds !== newIds || filesData.length === 0) {
-      if (filesData.length > 0 && newFiles.length > filesData.length) {
-        playChime();
-        showToast('☁️ ¡Nuevo archivo disponible en AirLink Express!');
+    if (!hasRenderedFilesOnce || currentIds !== newIds) {
+      if (hasRenderedFilesOnce && newFiles.length > filesData.length && !opts.suppressNewToast) {
+        const prevSet = new Set(filesData.map(f => f.id));
+        const hasGenuineNew = newFiles.some(f => !prevSet.has(f.id));
+        if (hasGenuineNew) {
+          playChime();
+          showToast('📎 ¡Nuevo archivo recibido en el chat!');
+        }
       }
+      hasRenderedFilesOnce = true;
       filesData = newFiles;
-      renderFiles(filesData);
+      renderUnifiedStream();
     }
   } catch (e) {
     console.error('Error cargando archivos de Drive:', e);
+  } finally {
+    isSyncingFiles = false;
   }
 }
 
@@ -685,9 +891,9 @@ function formatBytes(bytes, decimals = 1) {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 }
 
-function createShareButtonContent() {
+function createShareButtonContent(labelText = 'Compartir') {
   const frag = document.createDocumentFragment();
-  frag.appendChild(createSvgIcon(17, 17, [
+  frag.appendChild(createSvgIcon(14, 14, [
     ['circle', { cx: 18, cy: 5, r: 3 }],
     ['circle', { cx: 6, cy: 12, r: 3 }],
     ['circle', { cx: 18, cy: 19, r: 3 }],
@@ -696,114 +902,16 @@ function createShareButtonContent() {
   ]));
   const label = document.createElement('span');
   label.className = 'share-btn-label';
-  label.textContent = 'Compartir';
+  label.textContent = labelText;
   frag.appendChild(label);
   return frag;
-}
-
-// Renderizar la lista de archivos de forma segura (sin innerHTML dinámico)
-function renderFiles(files) {
-  if (filesCount) filesCount.textContent = files.length;
-  if (tabFilesBadge) tabFilesBadge.textContent = files.length;
-
-  if (!files || files.length === 0) {
-    filesList.replaceChildren(emptyState);
-    return;
-  }
-
-  const frag = document.createDocumentFragment();
-
-  files.forEach(file => {
-    const card = document.createElement('div');
-    card.className = 'file-card';
-
-    const fileLeft = document.createElement('div');
-    fileLeft.className = 'file-left';
-
-    const thumb = document.createElement('div');
-    thumb.className = 'file-thumb';
-    if (file.thumbnailLink) {
-      const img = document.createElement('img');
-      img.src = file.thumbnailLink;
-      img.alt = file.name;
-      img.loading = 'lazy';
-      img.referrerPolicy = 'no-referrer';
-      thumb.appendChild(img);
-    } else if (file.isImage) {
-      thumb.textContent = '🖼️';
-    } else if (file.isVideo) {
-      thumb.textContent = '🎥';
-    } else if (file.isAudio) {
-      thumb.textContent = '🎵';
-    } else if (file.isPdf) {
-      thumb.textContent = '📕';
-    } else if (file.isDoc) {
-      thumb.textContent = '📝';
-    } else {
-      thumb.textContent = '📄';
-    }
-
-    const meta = document.createElement('div');
-    meta.className = 'file-meta';
-
-    const nameEl = document.createElement('div');
-    nameEl.className = 'file-name';
-    nameEl.title = file.name;
-    nameEl.textContent = file.name;
-
-    const dateObj = new Date(file.createdAt);
-    const dateFormatted = isNaN(dateObj.getTime()) ? '' : dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const subEl = document.createElement('div');
-    subEl.className = 'file-sub';
-    subEl.textContent = dateFormatted ? `${file.formattedSize} • ${dateFormatted}` : file.formattedSize;
-
-    meta.append(nameEl, subEl);
-    fileLeft.append(thumb, meta);
-
-    const actions = document.createElement('div');
-    actions.className = 'file-actions';
-
-    const shareBtn = document.createElement('button');
-    shareBtn.className = 'btn-file-action share';
-    shareBtn.type = 'button';
-    shareBtn.title = 'Compartir directo a WhatsApp u otra app';
-    shareBtn.appendChild(createShareButtonContent());
-    shareBtn.addEventListener('click', () => shareDriveFile(file.id, shareBtn));
-
-    const downloadBtn = document.createElement('button');
-    downloadBtn.className = 'btn-file-action';
-    downloadBtn.type = 'button';
-    downloadBtn.title = 'Descargar';
-    downloadBtn.appendChild(createSvgIcon(18, 18, [
-      ['path', { d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4' }],
-      ['polyline', { points: '7 10 12 15 17 10' }],
-      ['line', { x1: 12, y1: 15, x2: 12, y2: 3 }]
-    ]));
-    downloadBtn.addEventListener('click', () => downloadDriveFile(file.id, file.name, file.mimeType));
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'btn-file-action delete';
-    deleteBtn.type = 'button';
-    deleteBtn.title = 'Eliminar de Drive';
-    deleteBtn.appendChild(createSvgIcon(16, 16, [
-      ['polyline', { points: '3 6 5 6 21 6' }],
-      ['path', { d: 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2' }]
-    ]));
-    deleteBtn.addEventListener('click', () => deleteDriveFile(file.id));
-
-    actions.append(shareBtn, downloadBtn, deleteBtn);
-    card.append(fileLeft, actions);
-    frag.appendChild(card);
-  });
-
-  filesList.replaceChildren(frag);
 }
 
 // Descargar archivo desde Google Drive
 async function downloadDriveFile(fileId, fileName, mimeType) {
   if (!isValidDriveId(fileId)) return;
   try {
-    showToast(`Descargando ${fileName}...`);
+    showToast(`⬇️ Descargando ${fileName}...`);
     const safeId = encodeURIComponent(fileId);
     let downloadUrl = `https://www.googleapis.com/drive/v3/files/${safeId}?alt=media`;
 
@@ -832,7 +940,7 @@ async function downloadDriveFile(fileId, fileName, mimeType) {
   }
 }
 
-// Compartir directamente a WhatsApp u otras apps móviles (Web Share API)
+// Compartir archivo directamente a WhatsApp u otras apps móviles (Web Share API)
 async function shareDriveFile(fileId, btnEl) {
   if (!isValidDriveId(fileId)) return;
   const file = filesData.find(f => f.id === fileId);
@@ -891,15 +999,29 @@ async function shareDriveFile(fileId, btnEl) {
 // Eliminar archivo de Drive
 async function deleteDriveFile(fileId) {
   if (!isValidDriveId(fileId)) return;
-  if (!confirm('¿Deseas eliminar este archivo de Google Drive?')) return;
+  if (!confirm('¿Deseas eliminar este archivo del chat y de Google Drive?')) return;
   try {
     const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, {
       method: 'DELETE'
     });
-    if (res.ok) {
-      showToast('Archivo eliminado de Google Drive');
+    let deletedOk = res.ok;
+
+    if (!deletedOk && res.status === 403 && hasInstantConfig()) {
+      try {
+        const fallback = await callInstantScript({ action: 'delete_file', fileId });
+        deletedOk = Boolean(fallback && fallback.ok);
+      } catch (e) {}
+    }
+
+    if (deletedOk) {
+      showToast('Archivo eliminado');
       filesData = filesData.filter(f => f.id !== fileId);
-      renderFiles(filesData);
+      renderUnifiedStream();
+      notifyPeerDevices('files');
+    } else if (res.status === 403) {
+      markWritePermissionNeeded();
+    } else {
+      showToast('No se pudo eliminar el archivo');
     }
   } catch (err) {
     showToast('Error al eliminar archivo');
@@ -907,8 +1029,21 @@ async function deleteDriveFile(fileId) {
 }
 
 // -------------------------------------------------------------
-// Subida de Archivos a Google Drive
+// Subida de Archivos al Chat (Con Verificación Real + Respaldo)
 // -------------------------------------------------------------
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const str = String(reader.result || '');
+      const commaIdx = str.indexOf(',');
+      resolve(commaIdx >= 0 ? str.slice(commaIdx + 1) : str);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 async function uploadFiles(files) {
   const ready = await ensureValidToken();
   if (!ready) {
@@ -922,13 +1057,19 @@ async function uploadFiles(files) {
     return;
   }
 
+  // Si había algún texto escrito en la caja al adjuntar, enviarlo también
+  if (chatInput && chatInput.value.trim().length > 0) {
+    sendMessage();
+  }
+
   progressContainer.style.display = 'flex';
   const total = files.length;
   let completed = 0;
+  let permissionDenied = false;
 
   for (let i = 0; i < total; i++) {
     const file = files[i];
-    progressTitle.textContent = `Subiendo ${file.name}... (${i + 1}/${total})`;
+    progressTitle.textContent = `Enviando ${file.name}... (${i + 1}/${total})`;
     progressPercent.textContent = `${Math.round(((i) / total) * 100)}%`;
     progressBarFill.style.width = `${Math.round(((i) / total) * 100)}%`;
     progressInfo.textContent = `${formatBytes(file.size)}`;
@@ -942,59 +1083,119 @@ async function uploadFiles(files) {
       form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
       form.append('file', file);
 
-      await fetchWithAuth('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+      const upRes = await fetchWithAuth('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name', {
         method: 'POST',
         body: form
       });
-      completed++;
+
+      if (upRes.ok) {
+        completed++;
+        writePermissionMissing = false;
+        continue;
+      }
+
+      if (upRes.status === 403 && hasInstantConfig() && file.size <= 25 * 1024 * 1024) {
+        try {
+          const b64 = await fileToBase64(file);
+          const scriptUp = await callInstantScript({
+            action: 'upload_file',
+            name: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            base64: b64
+          });
+          if (scriptUp && scriptUp.ok && scriptUp.fileId) {
+            completed++;
+            writePermissionMissing = false;
+            continue;
+          }
+        } catch (fallbackErr) {
+          console.error('Respaldo Apps Script falló:', fallbackErr);
+        }
+      }
+
+      if (upRes.status === 403) {
+        permissionDenied = true;
+        break;
+      }
     } catch (e) {
       console.error('Error subiendo archivo:', file.name, e);
     }
   }
 
-  progressBarFill.style.width = '100%';
-  progressPercent.textContent = '100%';
-  progressTitle.textContent = '¡Archivos subidos a Google Drive!';
-  playChime();
-  showToast(`¡${completed} archivo(s) guardado(s) en tu Drive!`);
+  fileInput.value = '';
+  cameraInput.value = '';
 
-  setTimeout(() => {
+  if (completed > 0) {
+    progressBarFill.style.width = '100%';
+    progressPercent.textContent = '100%';
+    progressTitle.textContent = '¡Enviado al chat!';
+    playChime();
+    showToast(`📎 ¡${completed} archivo(s) enviado(s) al chat!`);
+
+    await loadDriveFiles({ force: true, suppressNewToast: true });
+    notifyPeerDevices('files');
+
+    setTimeout(() => {
+      progressContainer.style.display = 'none';
+      progressBarFill.style.width = '0%';
+    }, 900);
+  } else {
     progressContainer.style.display = 'none';
     progressBarFill.style.width = '0%';
-    fileInput.value = '';
-    cameraInput.value = '';
-    loadDriveFiles();
-  }, 1200);
+    if (permissionDenied) {
+      markWritePermissionNeeded();
+    } else {
+      showToast('⚠️ Error al subir el archivo a Google Drive.');
+    }
+  }
 }
 
 // -------------------------------------------------------------
-// Pegar Captura de Pantalla con Ctrl+V (Directo a Drive)
+// Pegar Inteligente con Ctrl+V (Capturas, Archivos o Texto en el mismo Chat)
 // -------------------------------------------------------------
 window.addEventListener('paste', async (e) => {
-  if (activeMainTab === 'chat' && document.activeElement === chatInput) {
-    return; // Si está escribiendo texto, dejar pegar texto normalmente
-  }
+  const clipboard = e.clipboardData || e.originalEvent?.clipboardData;
+  if (!clipboard) return;
 
-  const items = (e.clipboardData || e.originalEvent.clipboardData).items;
-  let imageFound = false;
+  // 1. Si el portapapeles trae una imagen/captura o un archivo copiado, subirlo directo al chat
+  const items = clipboard.items || [];
+  const filesToUpload = [];
 
   for (const item of items) {
-    if (item.type.indexOf('image') !== -1) {
-      imageFound = true;
+    if (item.kind === 'file') {
       const blob = item.getAsFile();
-      const now = new Date();
-      const pad = (n) => String(n).padStart(2, '0');
-      const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
-      const captureFile = new File([blob], `Captura_${timestamp}.png`, { type: 'image/png' });
+      if (!blob) continue;
 
-      showToast('📋 Captura detectada en portapapeles. Subiendo a Drive...');
-      await uploadFiles([captureFile]);
-      break;
+      if (item.type.startsWith('image/')) {
+        const now = new Date();
+        const pad = (n) => String(n).padStart(2, '0');
+        const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+        const ext = item.type.split('/')[1] || 'png';
+        filesToUpload.push(new File([blob], `Captura_${timestamp}.${ext}`, { type: item.type }));
+      } else {
+        filesToUpload.push(blob);
+      }
     }
   }
 
-  if (!imageFound && btnPasteCapture && e.target === btnPasteCapture) {
-    showToast('No se encontró ninguna imagen en el portapapeles');
+  if (filesToUpload.length > 0) {
+    e.preventDefault();
+    showToast('📋 Archivo/captura detectada en portapapeles. Enviando al chat...');
+    await uploadFiles(filesToUpload);
+    return;
+  }
+
+  // 2. Si es texto y el usuario no tenía el cursor en la caja de chat, pegarlo ahí automáticamente
+  if (document.activeElement !== chatInput && chatInput) {
+    const pastedText = clipboard.getData('text/plain');
+    if (pastedText) {
+      e.preventDefault();
+      const current = chatInput.value;
+      chatInput.value = current ? current + (current.endsWith('\n') ? '' : '\n') + pastedText : pastedText;
+      if (chatCharCounter) chatCharCounter.textContent = `${chatInput.value.length} caracteres`;
+      chatInput.focus();
+      showToast('📋 Texto pegado en la caja. Pulsa Enter para enviar.');
+    }
   }
 });
 
@@ -1011,21 +1212,21 @@ if (btnPasteCapture) {
             const pad = (n) => String(n).padStart(2, '0');
             const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
             const file = new File([blob], `Captura_${timestamp}.png`, { type: imageType });
-            showToast('📋 Subiendo captura del portapapeles...');
+            showToast('📋 Enviando captura del portapapeles al chat...');
             await uploadFiles([file]);
             return;
           }
         }
       }
-      showToast('Copia una captura con Win+Shift+S y presiona Ctrl+V');
+      showToast('Toma una captura con Win+Shift+S y presiona Ctrl+V');
     } catch (err) {
-      showToast('Presiona Ctrl+V directamente para pegar la captura');
+      showToast('Presiona Ctrl+V directamente para enviar tu captura');
     }
   });
 }
 
 // -------------------------------------------------------------
-// Drag & Drop y Selección
+// Drag & Drop en Todo el Cuadro de Chat y Selección de Archivos
 // -------------------------------------------------------------
 if (btnSelectFiles) btnSelectFiles.addEventListener('click', () => fileInput.click());
 if (btnCamera) btnCamera.addEventListener('click', () => cameraInput.click());
@@ -1043,11 +1244,6 @@ if (cameraInput) {
 }
 
 if (dropZone) {
-  dropZone.addEventListener('click', (e) => {
-    if (e.target.closest('.btn')) return;
-    fileInput.click();
-  });
-
   ['dragenter', 'dragover'].forEach(name => {
     dropZone.addEventListener(name, (e) => {
       e.preventDefault();
@@ -1075,28 +1271,25 @@ function triggerManualRefresh(btn) {
     btn.style.transform = 'rotate(180deg)';
     setTimeout(() => { btn.style.transform = ''; }, 400);
   }
-  loadAllData();
-  showToast('Actualizando...');
+  loadAllData({ silent: false, force: true });
+  showToast('Sincronizando chat...');
 }
 
 if (btnRefresh) {
   btnRefresh.addEventListener('click', () => triggerManualRefresh(btnRefresh));
 }
 
-if (btnRefreshChat) {
-  btnRefreshChat.addEventListener('click', () => triggerManualRefresh(btnRefreshChat));
-}
-
 // -------------------------------------------------------------
-// Texto y Portapapeles Sincronizado en Drive (mensajes.json)
+// Mensajes de Texto y Enlaces (Doble Motor: Apps Script + Drive)
 // -------------------------------------------------------------
 function sanitizeMessagesArray(rawMsgs) {
   if (!Array.isArray(rawMsgs)) return [];
   return rawMsgs
     .filter(m => m && typeof m === 'object' && typeof m.text === 'string' && typeof m.id === 'string')
-    .slice(0, 500)
+    .slice(0, 300)
     .map(m => ({
       id: m.id,
+      streamType: 'message',
       text: m.text,
       sender: typeof m.sender === 'string' ? m.sender.slice(0, 40) : 'Dispositivo',
       device: m.device === 'mobile' ? 'mobile' : 'laptop',
@@ -1104,8 +1297,43 @@ function sanitizeMessagesArray(rawMsgs) {
     }));
 }
 
+function mergeMessageLists(listA, listB) {
+  const seen = new Set();
+  const combined = [];
+  [...(listA || []), ...(listB || [])].forEach(m => {
+    if (m && m.id && !seen.has(m.id)) {
+      seen.add(m.id);
+      combined.push({ ...m, streamType: 'message' });
+    }
+  });
+  combined.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  return combined.slice(0, 300);
+}
+
+function applyIncomingMessages(msgs, suppressToast = false) {
+  if (!Array.isArray(msgs)) return;
+  const currentSignature = messagesData.map(m => m.id).join(',');
+  const newSignature = msgs.map(m => m.id).join(',');
+
+  if (!hasRenderedMessagesOnce || currentSignature !== newSignature) {
+    if (hasRenderedMessagesOnce && msgs.length > messagesData.length && !suppressToast) {
+      const prevSet = new Set(messagesData.map(m => m.id));
+      const hasNewMsg = msgs.some(m => !prevSet.has(m.id));
+      if (hasNewMsg) {
+        playChime();
+        showToast('💬 Nuevo mensaje recibido en el chat');
+      }
+    }
+    hasRenderedMessagesOnce = true;
+    messagesData = msgs;
+    renderUnifiedStream();
+  }
+}
+
 async function resolveMessagesFilesInDrive() {
-  const q = encodeURIComponent(`'${airlinkFolderId}' in parents and trashed=false and name = 'mensajes.json'`);
+  const parentsClause = buildParentsQuery();
+  if (!parentsClause) return [];
+  const q = encodeURIComponent(`${parentsClause} and trashed=false and name = 'mensajes.json'`);
   const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime%20desc&fields=files(id,name,modifiedTime)`);
   if (!res.ok) return [];
   const data = await res.json();
@@ -1113,18 +1341,23 @@ async function resolveMessagesFilesInDrive() {
 }
 
 async function readMessagesFromFileId(fileId) {
+  if (!isValidDriveId(fileId)) return null;
   const res = await fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`);
   if (!res.ok) return null;
   const raw = await res.json();
   return Array.isArray(raw) ? sanitizeMessagesArray(raw) : [];
 }
 
-async function fetchLatestDriveMessages(mergeDuplicates = false) {
+async function fetchLatestDriveMessages() {
   if (!isValidDriveId(airlinkFolderId)) await initializeDriveFolder();
   if (!isValidDriveId(airlinkFolderId)) return null;
 
   const files = await resolveMessagesFilesInDrive();
   if (files.length === 0) {
+    if (isValidDriveId(messagesFileId)) {
+      const directMsgs = await readMessagesFromFileId(messagesFileId);
+      if (Array.isArray(directMsgs)) return directMsgs;
+    }
     messagesFileId = null;
     localStorage.removeItem('airlink_messages_file_id');
     return [];
@@ -1134,64 +1367,72 @@ async function fetchLatestDriveMessages(mergeDuplicates = false) {
   localStorage.setItem('airlink_messages_file_id', messagesFileId);
 
   const primaryMsgs = await readMessagesFromFileId(messagesFileId);
-  if (!mergeDuplicates || files.length <= 1 || !primaryMsgs) {
-    return primaryMsgs;
+  if (files.length <= 1) {
+    return primaryMsgs || [];
   }
 
-  // Si algún dispositivo creó un mensajes.json adicional antes, unificar por ID
-  const seen = new Set(primaryMsgs.map(m => m.id));
-  const merged = [...primaryMsgs];
-  for (let i = 1; i < Math.min(files.length, 3); i++) {
+  let merged = [...(primaryMsgs || [])];
+  for (let i = 1; i < Math.min(files.length, 4); i++) {
     try {
       const extra = await readMessagesFromFileId(files[i].id);
-      if (extra) {
-        extra.forEach(m => {
-          if (!seen.has(m.id)) {
-            seen.add(m.id);
-            merged.push(m);
-          }
-        });
-      }
+      if (extra) merged = mergeMessageLists(merged, extra);
+      fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(files[i].id)}`, { method: 'DELETE' }).catch(() => {});
     } catch (e) {}
   }
-  merged.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  return merged.slice(0, 300);
+  return merged;
 }
 
-async function loadDriveMessages() {
-  try {
-    const msgs = await fetchLatestDriveMessages(true);
-    if (!Array.isArray(msgs)) return;
+async function loadDriveMessages(opts = {}) {
+  if (isSyncingMessages && !opts.force) return;
+  isSyncingMessages = true;
 
-    const currentSignature = messagesData.map(m => m.id).join(',');
-    const newSignature = msgs.map(m => m.id).join(',');
-    if (currentSignature !== newSignature || messagesData.length === 0) {
-      if (messagesData.length > 0 && msgs.length > messagesData.length) {
-        playChime();
-        showToast('💬 Nuevo texto recibido');
-        if (activeMainTab !== 'chat' && chatUnreadDot) chatUnreadDot.style.display = 'block';
-      }
-      messagesData = msgs;
-      renderMessages(messagesData);
+  try {
+    const [scriptRes, driveMsgs] = await Promise.all([
+      hasInstantConfig()
+        ? callInstantScript({ action: 'get_messages' }).catch(() => null)
+        : Promise.resolve(null),
+      fetchLatestDriveMessages().catch(() => null)
+    ]);
+
+    let scriptMsgs = null;
+    if (scriptRes && scriptRes.ok && Array.isArray(scriptRes.messages)) {
+      scriptSupportsMessages = true;
+      localStorage.setItem('airlink_script_v2', '1');
+      scriptMsgs = sanitizeMessagesArray(scriptRes.messages);
     }
+
+    if (!Array.isArray(scriptMsgs) && !Array.isArray(driveMsgs)) return;
+
+    const unified = mergeMessageLists(scriptMsgs || [], driveMsgs || []);
+
+    if (Array.isArray(driveMsgs) && unified.length > driveMsgs.length) {
+      saveDriveMessages(unified).catch(() => {});
+    }
+    if (Array.isArray(scriptMsgs) && unified.length > scriptMsgs.length && unified.length > 0) {
+      callInstantScript({ action: 'send_message', message: unified[0] }).catch(() => {});
+    }
+
+    applyIncomingMessages(unified, Boolean(opts.suppressNewToast));
   } catch (e) {
-    console.error('Error cargando mensajes de Drive:', e);
+    console.error('Error cargando mensajes:', e);
+  } finally {
+    isSyncingMessages = false;
   }
 }
 
 async function saveDriveMessages(msgs) {
   if (!isValidDriveId(airlinkFolderId)) await initializeDriveFolder();
-  if (!isValidDriveId(airlinkFolderId)) return false;
+  if (!isValidDriveId(airlinkFolderId)) return { ok: false, status: 0 };
 
   const content = JSON.stringify(msgs, null, 2);
 
   try {
-    // Asegurar que no creemos mensajes.json duplicado si otro dispositivo ya lo creó
-    if (!isValidDriveId(messagesFileId)) {
-      const existing = await resolveMessagesFilesInDrive();
-      if (existing.length > 0) {
-        messagesFileId = existing[0].id;
-        localStorage.setItem('airlink_messages_file_id', messagesFileId);
+    const existing = await resolveMessagesFilesInDrive();
+    if (existing.length > 0) {
+      messagesFileId = existing[0].id;
+      localStorage.setItem('airlink_messages_file_id', messagesFileId);
+      for (let i = 1; i < existing.length; i++) {
+        fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(existing[i].id)}`, { method: 'DELETE' }).catch(() => {});
       }
     }
 
@@ -1201,12 +1442,15 @@ async function saveDriveMessages(msgs) {
         headers: { 'Content-Type': 'application/json' },
         body: content
       });
-      if (patchRes.ok) return true;
+      if (patchRes.ok) {
+        writePermissionMissing = false;
+        return { ok: true, status: 200 };
+      }
       if (patchRes.status === 404) {
         messagesFileId = null;
         localStorage.removeItem('airlink_messages_file_id');
       } else {
-        throw new Error(`Error PATCH (${patchRes.status})`);
+        return { ok: false, status: patchRes.status };
       }
     }
 
@@ -1223,18 +1467,20 @@ async function saveDriveMessages(msgs) {
       method: 'POST',
       body: form
     });
-    if (!res.ok) throw new Error(`Error POST (${res.status})`);
+    if (!res.ok) {
+      return { ok: false, status: res.status };
+    }
     const data = await res.json();
     if (data && isValidDriveId(data.id)) {
       messagesFileId = data.id;
       localStorage.setItem('airlink_messages_file_id', messagesFileId);
-      return true;
+      writePermissionMissing = false;
+      return { ok: true, status: 200 };
     }
-    return false;
+    return { ok: false, status: 500 };
   } catch (e) {
     console.error('Error guardando mensajes en Drive:', e);
-    showToast('⚠️ No se pudo guardar en Drive. Revisa tu conexión.');
-    return false;
+    return { ok: false, status: 500 };
   }
 }
 
@@ -1270,94 +1516,237 @@ function linkifyToFragment(text) {
   return frag;
 }
 
-function renderMessages(messages) {
-  messagesData = messages || [];
-  const count = messagesData.length;
-  if (messagesCount) messagesCount.textContent = count;
-  if (tabChatBadge) tabChatBadge.textContent = count;
+// -------------------------------------------------------------
+// Renderizado del Flujo Único de Chat (Mensajes + Archivos + Multimedia)
+// -------------------------------------------------------------
+function getFileBadgeLabel(file) {
+  if (file.isImage) return '🖼️ Imagen';
+  if (file.isAudio) return '🎵 Audio';
+  if (file.isVideo) return '🎥 Video';
+  if (file.isPdf) return '📕 PDF';
+  if (file.isDoc) return '📝 Documento';
+  return '📎 Archivo';
+}
 
-  if (!chatMessagesList) return;
+function renderUnifiedStream() {
+  if (!unifiedStreamList) return;
 
-  if (messagesData.length === 0) {
-    if (emptyChatState) chatMessagesList.replaceChildren(emptyChatState);
-    else chatMessagesList.replaceChildren();
+  const msgCount = messagesData.length;
+  const fCount = filesData.length;
+  const totalCount = msgCount + fCount;
+
+  if (countAll) countAll.textContent = totalCount;
+  if (countMsgs) countMsgs.textContent = msgCount;
+  if (countFiles) countFiles.textContent = fCount;
+
+  let combined = [];
+  if (activeStreamFilter === 'all') {
+    combined = [
+      ...messagesData.map(m => ({ ...m, streamType: 'message' })),
+      ...filesData.map(f => ({ ...f, streamType: 'file' }))
+    ];
+  } else if (activeStreamFilter === 'messages') {
+    combined = messagesData.map(m => ({ ...m, streamType: 'message' }));
+  } else {
+    combined = filesData.map(f => ({ ...f, streamType: 'file' }));
+  }
+
+  combined.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+  if (combined.length === 0) {
+    if (emptyStreamState) unifiedStreamList.replaceChildren(emptyStreamState);
+    else unifiedStreamList.replaceChildren();
     return;
   }
 
   const frag = document.createDocumentFragment();
-  const sortedMessages = [...messagesData].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const myDevice = isMobile ? 'mobile' : 'laptop';
 
-  sortedMessages.forEach(msg => {
+  combined.forEach(item => {
     const card = document.createElement('div');
-    const myDevice = isMobile ? 'mobile' : 'laptop';
-    const isMe = msg.device === myDevice;
-    const deviceClass = msg.device === 'mobile' ? 'sender-mobile' : 'sender-laptop';
-    card.className = `message-card ${deviceClass}`;
+    const date = new Date(item.createdAt);
+    const timeFormatted = isNaN(date.getTime())
+      ? ''
+      : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    const date = new Date(msg.createdAt);
-    const timeFormatted = isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const senderIcon = msg.device === 'mobile' ? '📱' : '💻';
+    if (item.streamType === 'message') {
+      const isMe = item.device === myDevice;
+      const deviceClass = item.device === 'mobile' ? 'sender-mobile' : 'sender-laptop';
+      card.className = `message-card ${deviceClass}`;
 
-    const headerRow = document.createElement('div');
-    headerRow.className = 'message-header';
+      const senderIcon = item.device === 'mobile' ? '📱' : '💻';
+      const headerRow = document.createElement('div');
+      headerRow.className = 'message-header';
 
-    const senderInfo = document.createElement('div');
-    senderInfo.className = 'message-sender-info';
+      const senderInfo = document.createElement('div');
+      senderInfo.className = 'message-sender-info';
 
-    const senderBadge = document.createElement('span');
-    senderBadge.className = 'message-sender-badge';
-    senderBadge.textContent = `${senderIcon} ${msg.sender}${isMe ? ' (Tú)' : ''}`;
+      const senderBadge = document.createElement('span');
+      senderBadge.className = 'message-sender-badge';
+      senderBadge.textContent = `${senderIcon} ${item.sender}${isMe ? ' (Tú)' : ''}`;
 
-    const timeEl = document.createElement('span');
-    timeEl.className = 'message-time';
-    timeEl.textContent = timeFormatted;
+      const timeEl = document.createElement('span');
+      timeEl.className = 'message-time';
+      timeEl.textContent = timeFormatted;
 
-    senderInfo.append(senderBadge, timeEl);
+      senderInfo.append(senderBadge, timeEl);
 
-    const actionsRow = document.createElement('div');
-    actionsRow.className = 'message-actions';
+      const actionsRow = document.createElement('div');
+      actionsRow.className = 'message-actions';
 
-    const copyBtn = document.createElement('button');
-    copyBtn.className = 'btn-msg-copy';
-    copyBtn.type = 'button';
-    copyBtn.title = 'Copiar texto al portapapeles';
-    copyBtn.appendChild(createSvgIcon(14, 14, [
-      ['rect', { x: 9, y: 9, width: 13, height: 13, rx: 2, ry: 2 }],
-      ['path', { d: 'M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1' }]
-    ]));
-    const copyLabel = document.createElement('span');
-    copyLabel.className = 'btn-copy-label';
-    copyLabel.textContent = 'Copiar';
-    copyBtn.appendChild(copyLabel);
-    copyBtn.addEventListener('click', () => copyMessageText(msg.id, copyBtn));
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'btn-msg-copy';
+      copyBtn.type = 'button';
+      copyBtn.title = 'Copiar texto al portapapeles';
+      copyBtn.appendChild(createSvgIcon(14, 14, [
+        ['rect', { x: 9, y: 9, width: 13, height: 13, rx: 2, ry: 2 }],
+        ['path', { d: 'M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1' }]
+      ]));
+      const copyLabel = document.createElement('span');
+      copyLabel.className = 'btn-copy-label';
+      copyLabel.textContent = 'Copiar';
+      copyBtn.appendChild(copyLabel);
+      copyBtn.addEventListener('click', () => copyMessageText(item.id, copyBtn));
 
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'btn-msg-delete';
-    deleteBtn.type = 'button';
-    deleteBtn.title = 'Eliminar mensaje';
-    deleteBtn.appendChild(createSvgIcon(13, 13, [
-      ['polyline', { points: '3 6 5 6 21 6' }],
-      ['path', { d: 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6' }]
-    ]));
-    deleteBtn.addEventListener('click', () => deleteMessage(msg.id));
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'btn-msg-delete';
+      deleteBtn.type = 'button';
+      deleteBtn.title = 'Eliminar mensaje';
+      deleteBtn.appendChild(createSvgIcon(13, 13, [
+        ['polyline', { points: '3 6 5 6 21 6' }],
+        ['path', { d: 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6' }]
+      ]));
+      deleteBtn.addEventListener('click', () => deleteMessage(item.id));
 
-    actionsRow.append(copyBtn, deleteBtn);
-    headerRow.append(senderInfo, actionsRow);
+      actionsRow.append(copyBtn, deleteBtn);
+      headerRow.append(senderInfo, actionsRow);
 
-    const bodyEl = document.createElement('div');
-    bodyEl.className = 'message-body';
-    bodyEl.appendChild(linkifyToFragment(msg.text));
+      const bodyEl = document.createElement('div');
+      bodyEl.className = 'message-body';
+      bodyEl.appendChild(linkifyToFragment(item.text));
 
-    card.append(headerRow, bodyEl);
+      card.append(headerRow, bodyEl);
+    } else {
+      // Burbuja Multimedia / Archivo dentro del mismo Chat
+      card.className = 'message-card sender-file';
+
+      const headerRow = document.createElement('div');
+      headerRow.className = 'message-header';
+
+      const senderInfo = document.createElement('div');
+      senderInfo.className = 'message-sender-info';
+
+      const senderBadge = document.createElement('span');
+      senderBadge.className = 'message-sender-badge';
+      senderBadge.textContent = getFileBadgeLabel(item);
+
+      const timeEl = document.createElement('span');
+      timeEl.className = 'message-time';
+      timeEl.textContent = timeFormatted ? `${item.formattedSize} • ${timeFormatted}` : item.formattedSize;
+
+      senderInfo.append(senderBadge, timeEl);
+
+      const actionsRow = document.createElement('div');
+      actionsRow.className = 'message-actions';
+
+      const shareBtn = document.createElement('button');
+      shareBtn.className = 'btn-msg-share';
+      shareBtn.type = 'button';
+      shareBtn.title = 'Compartir directo a WhatsApp u otra app';
+      shareBtn.appendChild(createShareButtonContent('Compartir'));
+      shareBtn.addEventListener('click', () => shareDriveFile(item.id, shareBtn));
+
+      const downloadBtn = document.createElement('button');
+      downloadBtn.className = 'btn-msg-copy';
+      downloadBtn.type = 'button';
+      downloadBtn.title = 'Descargar archivo';
+      downloadBtn.appendChild(createSvgIcon(14, 14, [
+        ['path', { d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4' }],
+        ['polyline', { points: '7 10 12 15 17 10' }],
+        ['line', { x1: 12, y1: 15, x2: 12, y2: 3 }]
+      ]));
+      const dlLabel = document.createElement('span');
+      dlLabel.textContent = 'Descargar';
+      downloadBtn.appendChild(dlLabel);
+      downloadBtn.addEventListener('click', () => downloadDriveFile(item.id, item.name, item.mimeType));
+
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'btn-msg-delete';
+      deleteBtn.type = 'button';
+      deleteBtn.title = 'Eliminar archivo';
+      deleteBtn.appendChild(createSvgIcon(13, 13, [
+        ['polyline', { points: '3 6 5 6 21 6' }],
+        ['path', { d: 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6' }]
+      ]));
+      deleteBtn.addEventListener('click', () => deleteDriveFile(item.id));
+
+      actionsRow.append(shareBtn, downloadBtn, deleteBtn);
+      headerRow.append(senderInfo, actionsRow);
+
+      const fileBox = document.createElement('div');
+      fileBox.className = 'chat-file-content';
+
+      const thumb = document.createElement('div');
+      thumb.className = 'chat-file-thumb';
+      thumb.title = 'Clic para descargar';
+      if (item.thumbnailLink) {
+        const img = document.createElement('img');
+        img.src = item.thumbnailLink;
+        img.alt = item.name;
+        img.loading = 'lazy';
+        img.referrerPolicy = 'no-referrer';
+        thumb.appendChild(img);
+      } else if (item.isImage) {
+        thumb.textContent = '🖼️';
+      } else if (item.isVideo) {
+        thumb.textContent = '🎥';
+      } else if (item.isAudio) {
+        thumb.textContent = '🎵';
+      } else if (item.isPdf) {
+        thumb.textContent = '📕';
+      } else if (item.isDoc) {
+        thumb.textContent = '📝';
+      } else {
+        thumb.textContent = '📄';
+      }
+      thumb.addEventListener('click', () => downloadDriveFile(item.id, item.name, item.mimeType));
+
+      const details = document.createElement('div');
+      details.className = 'chat-file-details';
+
+      const titleEl = document.createElement('div');
+      titleEl.className = 'chat-file-title';
+      titleEl.textContent = item.name;
+      titleEl.title = 'Clic para descargar ' + item.name;
+      titleEl.addEventListener('click', () => downloadDriveFile(item.id, item.name, item.mimeType));
+
+      const metaEl = document.createElement('div');
+      metaEl.className = 'chat-file-meta';
+      metaEl.textContent = `${item.formattedSize} • Guardado en AirLink Express`;
+
+      details.append(titleEl, metaEl);
+      fileBox.append(thumb, details);
+      card.append(headerRow, fileBox);
+    }
+
     frag.appendChild(card);
   });
 
-  chatMessagesList.replaceChildren(frag);
-
-  if (activeMainTab === 'chat') {
-    chatMessagesList.scrollTop = 0;
-  }
+  unifiedStreamList.replaceChildren(frag);
 }
+
+// Filtros rápidos dentro del mismo chat
+function setStreamFilter(filter) {
+  activeStreamFilter = filter;
+  if (filterAll) filterAll.classList.toggle('active', filter === 'all');
+  if (filterMsgs) filterMsgs.classList.toggle('active', filter === 'messages');
+  if (filterFiles) filterFiles.classList.toggle('active', filter === 'files');
+  renderUnifiedStream();
+}
+
+if (filterAll) filterAll.addEventListener('click', () => setStreamFilter('all'));
+if (filterMsgs) filterMsgs.addEventListener('click', () => setStreamFilter('messages'));
+if (filterFiles) filterFiles.addEventListener('click', () => setStreamFilter('files'));
 
 async function copyMessageText(id, btnEl) {
   const msg = messagesData.find(m => m.id === id);
@@ -1381,8 +1770,15 @@ async function copyMessageText(id, btnEl) {
 
 async function deleteMessage(id) {
   messagesData = messagesData.filter(m => m.id !== id);
-  renderMessages(messagesData);
-  await saveDriveMessages(messagesData);
+  renderUnifiedStream();
+
+  await Promise.all([
+    hasInstantConfig()
+      ? callInstantScript({ action: 'delete_message', messageId: id }).catch(() => {})
+      : Promise.resolve(),
+    saveDriveMessages(messagesData).catch(() => {})
+  ]);
+  notifyPeerDevices('chat', { mfId: messagesFileId });
   showToast('Mensaje eliminado');
 }
 
@@ -1401,42 +1797,70 @@ async function sendMessage() {
 
   const newMsg = {
     id: 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+    streamType: 'message',
     text,
     sender: mySender,
     device: myDevice,
     createdAt: new Date().toISOString()
   };
 
+  const previousMessages = [...messagesData];
   chatInput.value = '';
   if (chatCharCounter) chatCharCounter.textContent = '0 caracteres';
 
-  // Leer últimos mensajes remotos antes de guardar para no pisar mensajes de otro dispositivo
-  try {
-    const remoteMsgs = await fetchLatestDriveMessages(false);
-    if (Array.isArray(remoteMsgs) && remoteMsgs.length > 0) {
-      const seen = new Set([newMsg.id]);
-      const merged = [newMsg];
-      remoteMsgs.forEach(m => {
-        if (!seen.has(m.id)) {
-          seen.add(m.id);
-          merged.push(m);
-        }
+  messagesData = [newMsg, ...messagesData.filter(m => m.id !== newMsg.id)].slice(0, 300);
+  hasRenderedMessagesOnce = true;
+  renderUnifiedStream();
+
+  let savedScript = false;
+  let savedDrive = false;
+  let permissionError = false;
+
+  if (hasInstantConfig()) {
+    try {
+      const res = await callInstantScript({
+        action: 'send_message',
+        message: newMsg
       });
-      messagesData = merged.slice(0, 300);
-    } else {
-      messagesData.unshift(newMsg);
-      if (messagesData.length > 300) messagesData.pop();
-    }
-  } catch (e) {
-    messagesData.unshift(newMsg);
-    if (messagesData.length > 300) messagesData.pop();
+      if (res && res.ok && Array.isArray(res.messages)) {
+        scriptSupportsMessages = true;
+        localStorage.setItem('airlink_script_v2', '1');
+        messagesData = mergeMessageLists(messagesData, sanitizeMessagesArray(res.messages));
+        renderUnifiedStream();
+        savedScript = true;
+      }
+    } catch (e) {}
   }
 
-  renderMessages(messagesData);
-  const saved = await saveDriveMessages(messagesData);
-  if (saved) {
+  try {
+    const remoteMsgs = await fetchLatestDriveMessages();
+    if (Array.isArray(remoteMsgs) && remoteMsgs.length > 0) {
+      messagesData = mergeMessageLists(messagesData, remoteMsgs);
+      renderUnifiedStream();
+    }
+  } catch (e) {}
+
+  const driveRes = await saveDriveMessages(messagesData);
+  savedDrive = driveRes.ok;
+  if (driveRes.status === 403 && !savedScript) {
+    permissionError = true;
+  }
+
+  if (savedScript || savedDrive) {
     playChime();
-    showToast('Texto enviado a Drive');
+    showToast('💬 Mensaje enviado al chat');
+    notifyPeerDevices('chat', { mfId: messagesFileId });
+  } else {
+    messagesData = previousMessages;
+    renderUnifiedStream();
+    chatInput.value = text;
+    if (chatCharCounter) chatCharCounter.textContent = `${text.length} caracteres`;
+
+    if (permissionError) {
+      markWritePermissionNeeded();
+    } else {
+      showToast('⚠️ No se pudo enviar el texto. Verifica tu conexión.');
+    }
   }
 }
 
@@ -1479,57 +1903,127 @@ if (btnPasteText) {
 
 if (btnClearChat) {
   btnClearChat.addEventListener('click', async () => {
-    if (!confirm('¿Deseas vaciar todo el historial de textos?')) return;
+    if (!confirm('¿Deseas limpiar los mensajes de texto del chat? (Tus archivos de Drive se mantienen intactos)')) return;
     messagesData = [];
-    renderMessages([]);
-    await saveDriveMessages([]);
-    showToast('Historial vaciado');
+    renderUnifiedStream();
+    await Promise.all([
+      hasInstantConfig()
+        ? callInstantScript({ action: 'clear_messages' }).catch(() => {})
+        : Promise.resolve(),
+      saveDriveMessages([]).catch(() => {})
+    ]);
+    notifyPeerDevices('chat', { mfId: messagesFileId });
+    showToast('Mensajes de texto limpiados');
   });
 }
 
-// -------------------------------------------------------------
-// Control de Pestañas
-// -------------------------------------------------------------
-function switchMainTab(tab) {
-  activeMainTab = tab;
-  if (tab === 'files') {
-    if (tabNavFiles) {
-      tabNavFiles.classList.add('active');
-      tabNavFiles.setAttribute('aria-selected', 'true');
-    }
-    if (tabNavChat) {
-      tabNavChat.classList.remove('active');
-      tabNavChat.setAttribute('aria-selected', 'false');
-    }
-    if (filesTabSection) filesTabSection.style.display = 'flex';
-    if (chatTabSection) chatTabSection.style.display = 'none';
-  } else {
-    if (tabNavChat) {
-      tabNavChat.classList.add('active');
-      tabNavChat.setAttribute('aria-selected', 'true');
-    }
-    if (tabNavFiles) {
-      tabNavFiles.classList.remove('active');
-      tabNavFiles.setAttribute('aria-selected', 'false');
-    }
-    if (filesTabSection) filesTabSection.style.display = 'none';
-    if (chatTabSection) chatTabSection.style.display = 'flex';
-    if (chatUnreadDot) chatUnreadDot.style.display = 'none';
-    if (chatMessagesList) chatMessagesList.scrollTop = 0;
-    ensureValidToken().then((ok) => {
-      if (ok) loadDriveMessages();
-    });
+// Cargar datos (silenciosamente en segundo plano o al iniciar)
+async function loadAllData(opts = {}) {
+  if (await ensureValidToken()) {
+    loadDriveFiles(opts);
+    loadDriveMessages(opts);
   }
 }
 
-if (tabNavFiles) tabNavFiles.addEventListener('click', () => switchMainTab('files'));
-if (tabNavChat) tabNavChat.addEventListener('click', () => switchMainTab('chat'));
+// -------------------------------------------------------------
+// Instalar App (PWA) y Recibir Archivos Compartidos desde WhatsApp
+// -------------------------------------------------------------
+const btnInstallPwa = document.getElementById('btnInstallPwa');
+let deferredInstallPrompt = null;
 
-// Cargar datos a demanda (al iniciar sesión, al refrescar, o tras enviar/recibir)
-async function loadAllData() {
-  if (await ensureValidToken()) {
-    loadDriveFiles();
-    loadDriveMessages();
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  if (btnInstallPwa) {
+    btnInstallPwa.style.display = 'inline-flex';
+  }
+});
+
+if (btnInstallPwa) {
+  btnInstallPwa.addEventListener('click', async () => {
+    if (!deferredInstallPrompt) {
+      showToast('Abre el menú de Chrome (⋮) y pulsa "Instalar aplicación"');
+      return;
+    }
+    deferredInstallPrompt.prompt();
+    const { outcome } = await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+    if (outcome === 'accepted') {
+      btnInstallPwa.style.display = 'none';
+      showToast('📲 ¡AirLink instalado! Ya aparecerá en el menú Compartir de WhatsApp.');
+    }
+  });
+}
+
+function readAndClearSharedQueue() {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open('airlink_share_db', 1);
+      req.onupgradeneeded = (ev) => {
+        const db = ev.target.result;
+        if (!db.objectStoreNames.contains('shared_queue')) {
+          db.createObjectStore('shared_queue', { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = (ev) => {
+        const db = ev.target.result;
+        if (!db.objectStoreNames.contains('shared_queue')) {
+          db.close();
+          resolve(null);
+          return;
+        }
+        const tx = db.transaction('shared_queue', 'readwrite');
+        const store = tx.objectStore('shared_queue');
+        const getReq = store.get('latest');
+        getReq.onsuccess = () => {
+          const data = getReq.result || null;
+          if (data) store.delete('latest');
+          tx.oncomplete = () => {
+            db.close();
+            resolve(data);
+          };
+        };
+        getReq.onerror = () => {
+          db.close();
+          resolve(null);
+        };
+      };
+      req.onerror = () => resolve(null);
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+async function consumeIncomingShareTarget() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('shared')) {
+      history.replaceState(null, '', window.location.pathname);
+    }
+
+    const shared = await readAndClearSharedQueue();
+    if (!shared) return;
+
+    const sharedFiles = Array.isArray(shared.files) ? shared.files.filter(Boolean) : [];
+    const textParts = [shared.title, shared.text, shared.url]
+      .map(s => (typeof s === 'string' ? s.trim() : ''))
+      .filter(Boolean);
+    const combinedText = textParts.join('\n');
+
+    if ( combinedText && chatInput ) {
+      chatInput.value = combinedText;
+      if (chatCharCounter) chatCharCounter.textContent = `${combinedText.length} caracteres`;
+    }
+
+    if (sharedFiles.length > 0) {
+      showToast(`📲 Enviando ${sharedFiles.length} archivo(s) desde WhatsApp al chat...`);
+      await uploadFiles(sharedFiles);
+    } else if (combinedText) {
+      await sendMessage();
+    }
+  } catch (e) {
+    console.error('Error procesando elemento compartido:', e);
   }
 }
 
@@ -1543,14 +2037,18 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (await ensureValidToken()) {
       updateAuthUI(true);
       await initializeDriveFolder();
-      loadAllData();
+      startRealtimeSync();
+      await loadAllData({ suppressNewToast: true });
+      await consumeIncomingShareTarget();
     } else {
       updateAuthUI(false);
     }
   } else if (isTokenValid()) {
     updateAuthUI(true);
     await initializeDriveFolder();
-    loadAllData();
+    startRealtimeSync();
+    await loadAllData({ suppressNewToast: true });
+    await consumeIncomingShareTarget();
   } else {
     clearStoredSession(false);
     updateAuthUI(false);
@@ -1559,5 +2057,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
 // PWA Service Worker
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.register('sw.js?v=9').then((reg) => {
+    reg.update().catch(() => {});
+  }).catch(() => {});
 }
